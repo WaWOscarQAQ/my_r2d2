@@ -47,9 +47,27 @@ fn expected_registration() -> Vec<RegistrationEvent> {
             0x2000,
             "",
         ),
-        registration(RegistrationSource::Rcl, CallbackType::Subscription, 0, 0x2000, "/cmd_vel_callback"),
-        registration(RegistrationSource::Rclcpp, CallbackType::Timer, 0x3000, 0x4000, ""),
-        registration(RegistrationSource::Rcl, CallbackType::Subscription, 0, 0x4000, "timer_callback"),
+        registration(
+            RegistrationSource::Rcl,
+            CallbackType::Subscription,
+            0,
+            0x2000,
+            "/cmd_vel_callback",
+        ),
+        registration(
+            RegistrationSource::Rclcpp,
+            CallbackType::Timer,
+            0x3000,
+            0x4000,
+            "",
+        ),
+        registration(
+            RegistrationSource::Rcl,
+            CallbackType::Subscription,
+            0,
+            0x4000,
+            "timer_callback",
+        ),
     ]
 }
 
@@ -170,9 +188,7 @@ fn overflow_fixture_reports_overwritten_records() {
 fn live_round_trip_with_mock_writer() {
     let binary = std::env::var_os("TRACER_MOCK_WRITER")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tracer/build/mock_writer")
-        });
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("tracer/build/mock_writer"));
     if !binary.exists() {
         eprintln!(
             "skipping live round trip: {} not found (build tracer/ with cmake first)",

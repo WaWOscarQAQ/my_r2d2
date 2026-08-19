@@ -13,10 +13,10 @@
 //! fields only record the gap.
 
 use crate::interface_extractor::{Interface, Primitive, TypeNode};
-use crate::mutation::{generate_value, Mutator, OperatorWeights, OperatorsPerType};
+use crate::mutation::{Mutator, OperatorWeights, OperatorsPerType, generate_value};
 use crate::payload::{Error, Payload, Serializer, SimpleSerializer};
 use crate::payload_pool::PayloadPool;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::BTreeMap;
 
 /// A numeric range used for value generation and boundary mutation.
@@ -56,7 +56,11 @@ impl ValueRanges {
 fn default_range(primitive: Primitive) -> ValueRange {
     match primitive {
         Primitive::Bool => ValueRange::new(0.0, 1.0),
-        Primitive::I8 | Primitive::I16 | Primitive::I32 | Primitive::I64 | Primitive::F32
+        Primitive::I8
+        | Primitive::I16
+        | Primitive::I32
+        | Primitive::I64
+        | Primitive::F32
         | Primitive::F64 => ValueRange::new(-1000.0, 1000.0),
         Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => {
             ValueRange::new(0.0, 1000.0)
@@ -196,18 +200,15 @@ impl PayloadGenerator {
             let value = generate_value(&ty, &mut self.rng, &self.config);
             Payload::new(interface.name.clone(), interface.kind, value, round_seed)
         } else {
-            let picked = self
-                .pool
-                .pick_for_mutation(&mut self.rng)
-                .ok_or_else(|| Error::Unsupported("payload pool became empty mid-round".to_string()))?;
-            let interface = self
-                .interface(&picked.interface_id)
-                .ok_or_else(|| {
-                    Error::Unsupported(format!(
-                        "pool payload references unknown interface {:?}",
-                        picked.interface_id
-                    ))
-                })?;
+            let picked = self.pool.pick_for_mutation(&mut self.rng).ok_or_else(|| {
+                Error::Unsupported("payload pool became empty mid-round".to_string())
+            })?;
+            let interface = self.interface(&picked.interface_id).ok_or_else(|| {
+                Error::Unsupported(format!(
+                    "pool payload references unknown interface {:?}",
+                    picked.interface_id
+                ))
+            })?;
             let ty = top_level_type(interface);
             let value = Mutator::new(self.config.clone()).mutate(&picked.value, &ty, &mut self.rng);
             Payload::new(picked.interface_id.clone(), picked.kind, value, round_seed)
@@ -217,12 +218,15 @@ impl PayloadGenerator {
             .interface(&payload.interface_id)
             .expect("payload interface came from the extracted list");
         let mut payload = payload;
-        payload.serialized = SimpleSerializer.serialize(&payload.value, &top_level_type(interface))?;
+        payload.serialized =
+            SimpleSerializer.serialize(&payload.value, &top_level_type(interface))?;
         Ok(payload)
     }
 
     fn interface(&self, id: &str) -> Option<&Interface> {
-        self.interfaces.iter().find(|interface| interface.name == id)
+        self.interfaces
+            .iter()
+            .find(|interface| interface.name == id)
     }
 }
 

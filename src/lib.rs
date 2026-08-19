@@ -1,3 +1,5 @@
+#[cfg(unix)]
+pub mod callback_profile;
 pub mod interface_extractor;
 pub mod mutation;
 pub mod payload;

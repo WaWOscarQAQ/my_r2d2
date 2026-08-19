@@ -105,7 +105,11 @@ pub fn generate_value(ty: &TypeNode, rng: &mut impl Rng, config: &GeneratorConfi
                 Some(len) => *len,
                 None => rng.gen_range(config.array_len_range.clone()),
             };
-            ValueTree::Array((0..len).map(|_| generate_value(element, rng, config)).collect())
+            ValueTree::Array(
+                (0..len)
+                    .map(|_| generate_value(element, rng, config))
+                    .collect(),
+            )
         }
     }
 }
@@ -409,7 +413,12 @@ fn flip(value: ValueTree, rng: &mut impl Rng) -> ValueTree {
     ValueTree::Leaf(flipped)
 }
 
-fn boundary(value: ValueTree, ty: &TypeNode, config: &GeneratorConfig, rng: &mut impl Rng) -> ValueTree {
+fn boundary(
+    value: ValueTree,
+    ty: &TypeNode,
+    config: &GeneratorConfig,
+    rng: &mut impl Rng,
+) -> ValueTree {
     let TypeNode::Primitive(primitive) = ty else {
         return value;
     };
@@ -454,14 +463,22 @@ fn boundary(value: ValueTree, ty: &TypeNode, config: &GeneratorConfig, rng: &mut
     ValueTree::Leaf(bounded)
 }
 
-fn resize(value: ValueTree, ty: &TypeNode, config: &GeneratorConfig, rng: &mut impl Rng) -> ValueTree {
+fn resize(
+    value: ValueTree,
+    ty: &TypeNode,
+    config: &GeneratorConfig,
+    rng: &mut impl Rng,
+) -> ValueTree {
     match (value, ty) {
         (ValueTree::Leaf(Value::String(mut text)), TypeNode::Primitive(_)) => {
             let len = len_range(Primitive::String, config, rng);
             if text.len() > len {
                 text.truncate(len);
             } else {
-                text.extend(std::iter::repeat_with(|| rng.gen_range(0x20u8..=0x7e) as char).take(len - text.len()));
+                text.extend(
+                    std::iter::repeat_with(|| rng.gen_range(0x20u8..=0x7e) as char)
+                        .take(len - text.len()),
+                );
             }
             ValueTree::Leaf(Value::String(text))
         }
@@ -470,9 +487,7 @@ fn resize(value: ValueTree, ty: &TypeNode, config: &GeneratorConfig, rng: &mut i
             if bytes.len() > len {
                 bytes.truncate(len);
             } else {
-                bytes.extend(
-                    std::iter::repeat_with(|| rng.r#gen::<u8>()).take(len - bytes.len()),
-                );
+                bytes.extend(std::iter::repeat_with(|| rng.r#gen::<u8>()).take(len - bytes.len()));
             }
             ValueTree::Leaf(Value::Bytes(bytes))
         }

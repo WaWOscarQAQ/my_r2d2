@@ -147,7 +147,9 @@ impl TraceReader {
         }
         let version = read_u32(&header, 4);
         if version != VERSION {
-            return Err(TraceError::Malformed(format!("unsupported version {version}")));
+            return Err(TraceError::Malformed(format!(
+                "unsupported version {version}"
+            )));
         }
 
         let registration_capacity = read_u64(&header, 16);
@@ -162,7 +164,9 @@ impl TraceReader {
                     + registration_capacity * REGISTRATION_RECORD_SIZE
                     + RING_HEADER_SIZE
         {
-            return Err(TraceError::Malformed("inconsistent header offsets".to_string()));
+            return Err(TraceError::Malformed(
+                "inconsistent header offsets".to_string(),
+            ));
         }
 
         Ok(Self {
@@ -266,7 +270,11 @@ fn parse_registration(bytes: &[u8]) -> Result<RegistrationEvent, TraceError> {
     let source = match read_u32(bytes, 0) {
         0 => RegistrationSource::Rclcpp,
         1 => RegistrationSource::Rcl,
-        other => return Err(TraceError::Malformed(format!("bad registration source {other}"))),
+        other => {
+            return Err(TraceError::Malformed(format!(
+                "bad registration source {other}"
+            )));
+        }
     };
     let callback_type = match read_u32(bytes, 4) {
         0 => CallbackType::Subscription,
@@ -298,7 +306,11 @@ fn parse_runtime(bytes: &[u8]) -> Result<RuntimeEvent, TraceError> {
         1 => RuntimeEventType::CallbackStart,
         2 => RuntimeEventType::CallbackEnd,
         3 => RuntimeEventType::RclTake,
-        other => return Err(TraceError::Malformed(format!("bad runtime event type {other}"))),
+        other => {
+            return Err(TraceError::Malformed(format!(
+                "bad runtime event type {other}"
+            )));
+        }
     };
     Ok(RuntimeEvent {
         event_type,

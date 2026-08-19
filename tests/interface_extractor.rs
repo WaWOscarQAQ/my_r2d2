@@ -24,7 +24,7 @@ fn mock_returns_interfaces() {
     let item = Interface::new(
         "/cmd_vel",
         Kind::Topic,
-        vec![Field::new("linear_x", "float64")],
+        vec![Field::new("linear_x", Primitive::F64)],
     );
     let ext = MockExtractor::new(vec![item.clone()]);
 
@@ -37,19 +37,10 @@ fn empty_mock_returns_empty_list() {
 }
 
 #[test]
-fn from_str_maps_ros_primitive_names() {
-    assert_eq!(TypeNode::from("float64"), TypeNode::Primitive(Primitive::F64));
-    assert_eq!(TypeNode::from("string"), TypeNode::Primitive(Primitive::String));
-}
-
-#[test]
 fn type_node_constructors_build_nested_and_array_shapes() {
     let ty = TypeNode::nested(vec![
-        Field::new(
-            "point",
-            TypeNode::nested(vec![Field::new("x", "float64")]),
-        ),
-        Field::new("data", TypeNode::fixed_array(TypeNode::Primitive(Primitive::U8), 3)),
+        Field::new("point", TypeNode::nested(vec![Field::new("x", Primitive::F64)])),
+        Field::new("data", TypeNode::fixed_array(Primitive::U8.into(), 3)),
     ]);
 
     assert_eq!(
@@ -57,10 +48,7 @@ fn type_node_constructors_build_nested_and_array_shapes() {
         TypeNode::Nested(vec![
             Field::new(
                 "point",
-                TypeNode::Nested(vec![Field::new(
-                    "x",
-                    TypeNode::Primitive(Primitive::F64)
-                )])
+                TypeNode::Nested(vec![Field::new("x", TypeNode::Primitive(Primitive::F64))])
             ),
             Field::new(
                 "data",
@@ -75,7 +63,7 @@ fn interface_carries_associated_data_files() {
     let interface = Interface::new(
         "/cmd_vel",
         Kind::Topic,
-        vec![Field::new("linear_x", "float64")],
+        vec![Field::new("linear_x", Primitive::F64)],
     )
     .with_data_files(vec![DataFile::new(
         "geometry_msgs/msg/Twist.msg",
