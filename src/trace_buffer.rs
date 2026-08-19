@@ -26,6 +26,7 @@ const RING_DATA_SIZE: u64 = 24;
 const REGISTRATION_RECORD_SIZE: u64 = 160;
 const RUNTIME_RECORD_SIZE: u64 = 56;
 const CALLBACK_NAME_CAPACITY: usize = 128;
+const REGISTRATION_FLAG_NAME_TRUNCATED: u32 = 1;
 
 /// Which tracer produced a registration record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +63,9 @@ pub struct RegistrationEvent {
     pub rclcpp_handler: u64,
     pub rcl_handler: u64,
     pub callback_name: String,
+    /// The tracer could not store the complete callback name. A truncated
+    /// name must never be used to derive the paper-defined callback ID.
+    pub callback_name_truncated: bool,
 }
 
 /// One entry of the runtime execution buffer.
@@ -283,6 +287,12 @@ fn parse_registration(bytes: &[u8]) -> Result<RegistrationEvent, TraceError> {
         other => return Err(TraceError::Malformed(format!("bad callback type {other}"))),
     };
     let name_len = read_u32(bytes, 24) as usize;
+    let flags = read_u32(bytes, 28);
+    if flags & !REGISTRATION_FLAG_NAME_TRUNCATED != 0 {
+        return Err(TraceError::Malformed(format!(
+            "unsupported registration flags 0x{flags:08x}"
+        )));
+    }
     if name_len > CALLBACK_NAME_CAPACITY {
         return Err(TraceError::Malformed(format!(
             "callback name length {name_len} exceeds capacity"
@@ -297,6 +307,7 @@ fn parse_registration(bytes: &[u8]) -> Result<RegistrationEvent, TraceError> {
         rclcpp_handler: read_u64(bytes, 8),
         rcl_handler: read_u64(bytes, 16),
         callback_name,
+        callback_name_truncated: flags & REGISTRATION_FLAG_NAME_TRUNCATED != 0,
     })
 }
 

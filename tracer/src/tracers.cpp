@@ -39,19 +39,13 @@ std::uint64_t address_of(const void* pointer) {
   return reinterpret_cast<std::uint64_t>(pointer);
 }
 
-void require_init() {
-  if (g_shm.data() == nullptr) {
-    throw std::logic_error("tracer shared memory not initialized; call tracer::init() first");
-  }
-}
-
 [[noreturn]] void throw_system(const char* operation) {
   throw std::runtime_error(std::string(operation) + ": " + std::strerror(errno));
 }
 
 }  // namespace
 
-std::uint64_t now_ns() {
+std::uint64_t now_ns() noexcept {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
   return static_cast<std::uint64_t>(ts.tv_sec) * 1000000000ULL +
@@ -98,8 +92,10 @@ void init(const char* shm_name) {
 }
 
 void rclcpp_callback_init(const void* rclcpp_handler, const void* rcl_handler,
-                          CallbackType callback_type) {
-  require_init();
+                          CallbackType callback_type) noexcept {
+  if (g_shm.data() == nullptr) {
+    return;
+  }
   RegistrationRecord record{};
   record.source = RegistrationSource::Rclcpp;
   record.callback_type = callback_type;
@@ -108,22 +104,29 @@ void rclcpp_callback_init(const void* rclcpp_handler, const void* rcl_handler,
   g_registration.push(record);
 }
 
-void rcl_callback_init(const char* callback_name, const void* rcl_handler) {
-  require_init();
+void rcl_callback_init(const char* callback_name, const void* rcl_handler) noexcept {
+  if (g_shm.data() == nullptr || callback_name == nullptr) {
+    return;
+  }
   RegistrationRecord record{};
   record.source = RegistrationSource::Rcl;
   record.rcl_handler = address_of(rcl_handler);
-  const std::size_t len = std::strlen(callback_name);
-  if (len > kCallbackNameCapacity) {
-    throw std::invalid_argument("callback name exceeds record capacity");
+  const std::size_t observed_len = ::strnlen(callback_name, kCallbackNameCapacity + 1);
+  const std::size_t len =
+      observed_len > kCallbackNameCapacity ? kCallbackNameCapacity : observed_len;
+  if (observed_len > kCallbackNameCapacity) {
+    record.flags |= kRegistrationFlagNameTruncated;
   }
   record.callback_name_len = static_cast<std::uint32_t>(len);
   std::memcpy(record.callback_name, callback_name, len);
   g_registration.push(record);
 }
 
-void executor_execute(const void* rclcpp_handler, std::uint64_t invoke_timestamp) {
-  require_init();
+void executor_execute(const void* rclcpp_handler,
+                      std::uint64_t invoke_timestamp) noexcept {
+  if (g_shm.data() == nullptr) {
+    return;
+  }
   RuntimeRecord record{};
   record.event_type = RuntimeEventType::ExecutorExecute;
   record.rclcpp_handler = address_of(rclcpp_handler);
@@ -131,8 +134,11 @@ void executor_execute(const void* rclcpp_handler, std::uint64_t invoke_timestamp
   g_runtime.push(record);
 }
 
-void callback_start(const void* rclcpp_handler, std::uint64_t start_timestamp) {
-  require_init();
+void callback_start(const void* rclcpp_handler,
+                    std::uint64_t start_timestamp) noexcept {
+  if (g_shm.data() == nullptr) {
+    return;
+  }
   RuntimeRecord record{};
   record.event_type = RuntimeEventType::CallbackStart;
   record.rclcpp_handler = address_of(rclcpp_handler);
@@ -140,8 +146,11 @@ void callback_start(const void* rclcpp_handler, std::uint64_t start_timestamp) {
   g_runtime.push(record);
 }
 
-void callback_end(const void* rclcpp_handler, std::uint64_t end_timestamp) {
-  require_init();
+void callback_end(const void* rclcpp_handler,
+                  std::uint64_t end_timestamp) noexcept {
+  if (g_shm.data() == nullptr) {
+    return;
+  }
   RuntimeRecord record{};
   record.event_type = RuntimeEventType::CallbackEnd;
   record.rclcpp_handler = address_of(rclcpp_handler);
@@ -150,8 +159,10 @@ void callback_end(const void* rclcpp_handler, std::uint64_t end_timestamp) {
 }
 
 void rcl_take(const void* rcl_handler, std::uint64_t buffer_size,
-              std::uint64_t pub_timestamp, std::uint64_t sub_timestamp) {
-  require_init();
+              std::uint64_t pub_timestamp, std::uint64_t sub_timestamp) noexcept {
+  if (g_shm.data() == nullptr) {
+    return;
+  }
   RuntimeRecord record{};
   record.event_type = RuntimeEventType::RclTake;
   record.rcl_handler = address_of(rcl_handler);

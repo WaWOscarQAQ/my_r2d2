@@ -32,6 +32,7 @@ fn registration(
         rclcpp_handler,
         rcl_handler,
         callback_name: callback_name.to_string(),
+        callback_name_truncated: false,
     }
 }
 

@@ -1,0 +1,505 @@
+//! R2D2 闭环 × 真实 Jazzy nav2（只插桩 nav2 应用层，见 docs/plan）。
+//!
+//! 流程（对应论文 Figure 3 的生成与反馈两侧）：
+//!
+//! 1. dry run：FileExtractor 解析仓库内真实 `sensor_msgs/LaserScan.msg`。
+//! 2. 每轮：PayloadGenerator 生成 LaserScan payload → 写文本 payload 文件 →
+//!    spawn `r2d2_scan_bridge` 以 20 Hz 向 /scan 发布 2 秒。
+//! 3. 插桩后的 nav2_costmap_2d（ObstacleLayer LaserScan 回调）把注册与运行时
+//!    事件写进 /dev/shm/r2d2_nav2；本进程实时 drain、profile。
+//! 4. BaselineOracle（阶段 F 雏形）判定新执行序列 / 延迟偏差 / 吞吐下降；
+//!    costmap 进程组死亡记为 crash；crash 或 new state 的 payload 入池。
+//!
+//! 需要先构建 nav2_ws（含 r2d2_tracer、r2d2_scan_bridge）：
+//!   bash nav2_ws 下 colcon build --packages-select r2d2_tracer r2d2_scan_bridge ...
+//!
+//! 运行：cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42
+
+use my_r2d2::callback_profile::{profile_trace, CallbackRegistry, CallbackTrace};
+use my_r2d2::interface_extractor::{Extractor, FileExtractor, Interface, Kind};
+use my_r2d2::payload::{Payload, Value, ValueTree};
+use my_r2d2::payload_generator::{GeneratorConfig, PayloadGenerator};
+use my_r2d2::trace_buffer::TraceReader;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::thread;
+use std::time::{Duration, Instant};
+
+const SHM_PATH: &str = "/dev/shm/r2d2_nav2";
+const ROS_DOMAIN_ID: &str = "190";
+const RANGES_PER_SCAN: usize = 180;
+
+/// 阶段 F 雏形（与 end_to_end example 相同的三指标判定）。
+struct BaselineOracle {
+    graph_edges: HashSet<(u64, u64)>,
+    latency_sum: HashMap<u64, u64>,
+    latency_count: HashMap<u64, u64>,
+    throughput_sum: HashMap<u64, f64>,
+    throughput_count: HashMap<u64, u64>,
+    latency_factor: f64,
+    throughput_floor: f64,
+}
+
+impl BaselineOracle {
+    fn new(latency_factor: f64, throughput_floor: f64) -> Self {
+        Self {
+            graph_edges: HashSet::new(),
+            latency_sum: HashMap::new(),
+            latency_count: HashMap::new(),
+            throughput_sum: HashMap::new(),
+            throughput_count: HashMap::new(),
+            latency_factor,
+            throughput_floor,
+        }
+    }
+
+    fn observe(&mut self, trace: &CallbackTrace) {
+        for latency in &trace.call_trace {
+            *self.latency_sum.entry(latency.callback_id).or_default() +=
+                latency.execution_latency;
+            *self.latency_count.entry(latency.callback_id).or_default() += 1;
+        }
+        for msg in &trace.msg_trace {
+            *self.throughput_sum.entry(msg.callback_id).or_default() += msg.throughput;
+            *self.throughput_count.entry(msg.callback_id).or_default() += 1;
+        }
+    }
+
+    fn mean_latency(&self, id: u64) -> Option<f64> {
+        let count = *self.latency_count.get(&id)?;
+        if count == 0 {
+            return None;
+        }
+        Some(*self.latency_sum.get(&id).unwrap_or(&0) as f64 / count as f64)
+    }
+
+    fn mean_throughput(&self, id: u64) -> Option<f64> {
+        let count = *self.throughput_count.get(&id)?;
+        if count == 0 {
+            return None;
+        }
+        Some(*self.throughput_sum.get(&id).unwrap_or(&0.0) / count as f64)
+    }
+
+    fn decide(&mut self, trace: &CallbackTrace, baseline: bool) -> bool {
+        let mut new_state = false;
+        let mut previous: Option<u64> = None;
+        for latency in &trace.call_trace {
+            if let Some(prev) = previous
+                && !baseline
+                && self.graph_edges.insert((prev, latency.callback_id))
+            {
+                new_state = true;
+            }
+            previous = Some(latency.callback_id);
+        }
+        if !baseline {
+            for latency in &trace.call_trace {
+                if let Some(mean) = self.mean_latency(latency.callback_id)
+                    && mean > 0.0
+                    && latency.execution_latency as f64 > mean * self.latency_factor
+                {
+                    new_state = true;
+                }
+            }
+            for msg in &trace.msg_trace {
+                if let Some(mean) = self.mean_throughput(msg.callback_id)
+                    && msg.throughput < mean * self.throughput_floor
+                {
+                    new_state = true;
+                }
+            }
+        }
+        self.observe(trace);
+        new_state
+    }
+
+    fn edge_count(&self) -> usize {
+        self.graph_edges.len()
+    }
+
+    fn distinct_callbacks(&self) -> usize {
+        self.latency_sum.len()
+    }
+}
+
+struct Config {
+    rounds: u64,
+    seed: u64,
+    baseline: u64,
+    latency_factor: f64,
+    throughput_floor: f64,
+    /// 每轮向 /scan 发布的时长（秒）。
+    round_duration_sec: f64,
+    /// /scan 发布速率（Hz）。
+    bridge_rate_hz: u32,
+    /// TSAN 报告输出目录；None 表示不启用 TSAN_OPTIONS 透传。
+    tsan_log_dir: Option<PathBuf>,
+}
+
+impl Config {
+    fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
+        let mut config = Self {
+            rounds: 10,
+            seed: 42,
+            baseline: 2,
+            latency_factor: 2.0,
+            throughput_floor: 0.5,
+            round_duration_sec: 2.0,
+            bridge_rate_hz: 20,
+            tsan_log_dir: None,
+        };
+        let mut args = args.peekable();
+        while let Some(arg) = args.next() {
+            let mut value = |flag: &str| -> Result<String, String> {
+                args.next().ok_or_else(|| format!("{flag} needs a value"))
+            };
+            match arg.as_str() {
+                "--rounds" => config.rounds = value("--rounds")?.parse::<u64>().map_err(|e| e.to_string())?,
+                "--seed" => config.seed = value("--seed")?.parse::<u64>().map_err(|e| e.to_string())?,
+                "--baseline" => config.baseline = value("--baseline")?.parse::<u64>().map_err(|e| e.to_string())?,
+                "--latency-factor" => {
+                    config.latency_factor = value("--latency-factor")?.parse::<f64>().map_err(|e| e.to_string())?
+                }
+                "--throughput-floor" => {
+                    config.throughput_floor = value("--throughput-floor")?.parse::<f64>().map_err(|e| e.to_string())?
+                }
+                "--round-duration" => {
+                    config.round_duration_sec = value("--round-duration")?.parse::<f64>().map_err(|e| e.to_string())?
+                }
+                "--bridge-rate" => {
+                    config.bridge_rate_hz = value("--bridge-rate")?.parse::<u32>().map_err(|e| e.to_string())?
+                }
+                "--tsan-log-dir" => config.tsan_log_dir = Some(PathBuf::from(value("--tsan-log-dir")?)),
+                other => return Err(format!("unknown flag {other}")),
+            }
+        }
+        Ok(config)
+    }
+}
+
+fn ws_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("nav2_ws")
+}
+
+/// Dry run：从真实 LaserScan.msg 提取接口规范。
+fn extract_laser_scan(fixtures_root: &Path) -> Result<Interface, String> {
+    let extractor = FileExtractor::new(
+        vec![fixtures_root.join("sensor_msgs/msg/LaserScan.msg")],
+        vec![fixtures_root.to_path_buf()],
+    );
+    let mut interfaces = extractor.extract().map_err(|e| e.to_string())?;
+    interfaces
+        .drain(..)
+        .find(|i| i.name == "LaserScan")
+        .ok_or_else(|| "LaserScan interface not extracted".to_string())
+}
+
+fn field_f32(fields: &[ValueTree], index: usize) -> f32 {
+    match fields.get(index) {
+        Some(ValueTree::Leaf(Value::F32(v))) => *v,
+        _ => 0.0,
+    }
+}
+
+/// payload 值树 → 物理上合法的 LaserScan 参数 + ranges（夹取范围是测试
+/// harness 的 reproduction choice，保证 nav2 收到可投影的扫描）。
+fn scan_params(payload: &Payload) -> (f32, f32, f32, f32, f32, f32, f32, Vec<f32>) {
+    let ValueTree::Nested(fields) = &payload.value else {
+        return (0.0, 0.0, 0.01, 0.0, 0.05, 0.01, 12.0, vec![]);
+    };
+    let angle_min = field_f32(fields, 1).clamp(-std::f32::consts::PI, std::f32::consts::PI);
+    let angle_max = field_f32(fields, 2).clamp(
+        angle_min + 0.01,
+        angle_min + std::f32::consts::PI,
+    );
+    let angle_increment = field_f32(fields, 3).abs().clamp(0.001, 0.35);
+    let time_increment = field_f32(fields, 4).abs().min(0.1);
+    let scan_time = field_f32(fields, 5).abs().min(0.5);
+    let range_min = field_f32(fields, 6).clamp(0.01, 5.0);
+    let range_max = field_f32(fields, 7).clamp(range_min + 0.1, 20.0);
+
+    let mut ranges = Vec::new();
+    if let Some(ValueTree::Array(items)) = fields.get(8) {
+        for item in items {
+            if let ValueTree::Leaf(Value::F32(v)) = item {
+                ranges.push(*v);
+            }
+        }
+    }
+    let cycled: Vec<f32> = if ranges.is_empty() {
+        vec![range_max; RANGES_PER_SCAN]
+    } else {
+        ranges
+            .iter()
+            .cycle()
+            .take(RANGES_PER_SCAN)
+            .copied()
+            .collect()
+    };
+    let clamped = cycled
+        .iter()
+        .map(|r| r.clamp(range_min, range_max))
+        .collect();
+    (
+        angle_min,
+        angle_max,
+        angle_increment,
+        time_increment,
+        scan_time,
+        range_min,
+        range_max,
+        clamped,
+    )
+}
+
+fn write_payload_file(path: &Path, payload: &Payload) {
+    let (amin, amax, ainc, tinc, stime, rmin, rmax, ranges) = scan_params(payload);
+    let mut text = format!("{amin} {amax} {ainc} {tinc} {stime} {rmin} {rmax}\n");
+    for (i, r) in ranges.iter().enumerate() {
+        if i > 0 {
+            text.push(' ');
+        }
+        text.push_str(&format!("{r}"));
+    }
+    text.push('\n');
+    fs::write(path, text).expect("write payload file");
+}
+
+fn clean_env(mut command: Command) -> Command {
+    command
+        .env("ROS_DOMAIN_ID", ROS_DOMAIN_ID)
+        .env_remove("LD_PRELOAD")
+        .env_remove("ASAN_OPTIONS")
+        .env_remove("TSAN_OPTIONS")
+        .env_remove("COLCON_CURRENT_PREFIX");
+    command
+}
+
+fn stack_alive(stack: &mut std::process::Child) -> bool {
+    // try_wait 会回收僵尸进程；kill -0 对僵尸返回成功，不能用于存活判定。
+    matches!(stack.try_wait(), Ok(None))
+}
+
+fn main() {
+    let config = match Config::parse(std::env::args().skip(1)) {
+        Ok(config) => config,
+        Err(message) => {
+            eprintln!("nav2_costmap_e2e: {message}");
+            std::process::exit(2);
+        }
+    };
+    let ws = ws_dir();
+    let stack_script = ws.join("launch_stack.sh");
+    let payload_file = ws.join("payload_round.txt");
+    let install_setup = ws.join("install/setup.bash");
+    if !install_setup.exists() {
+        eprintln!("nav2_costmap_e2e: {} missing; build nav2_ws first", install_setup.display());
+        std::process::exit(1);
+    }
+
+    let fixtures_root =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ros_interfaces");
+    let interface = match extract_laser_scan(&fixtures_root) {
+        Ok(interface) => interface,
+        Err(message) => {
+            eprintln!("nav2_costmap_e2e: dry run failed: {message}");
+            std::process::exit(1);
+        }
+    };
+    println!(
+        "dry run: extracted interface {} ({}) with {} top-level fields",
+        interface.name,
+        if interface.kind == Kind::Topic { "topic" } else { "service" },
+        interface.fields.len()
+    );
+
+    // 1. 启动插桩 costmap 栈（setsid 使其自成一个进程组，便于整体终止）。
+    let mut stack_command = Command::new("setsid");
+    stack_command
+        .arg("bash")
+        .arg(&stack_script)
+        .env("ROS_DOMAIN_ID", ROS_DOMAIN_ID)
+        .env_remove("LD_PRELOAD")
+        .env_remove("ASAN_OPTIONS")
+        .env_remove("COLCON_CURRENT_PREFIX");
+    if let Some(log_dir) = &config.tsan_log_dir {
+        let _ = fs::create_dir_all(log_dir);
+        stack_command.env(
+            "TSAN_OPTIONS",
+            format!(
+                "log_path={}/tsan:halt_on_error=0:history_size=7:second_deadlock_stack=1",
+                log_dir.display()
+            ),
+        );
+        println!("tsan: reports will be written to {}", log_dir.display());
+    } else {
+        stack_command.env_remove("TSAN_OPTIONS");
+    }
+    let mut stack = stack_command.spawn().expect("spawn costmap stack");
+    let stack_pid = stack.id();
+    println!("stack leader pid = {stack_pid}");
+
+    // 2. 等待 costmap 注册回调并 drain 注册记录（超时 30s）。
+    let _ = fs::remove_file(SHM_PATH);
+    let mut reader = loop {
+        if let Ok(reader) = TraceReader::open(SHM_PATH) {
+            break reader;
+        }
+        if !stack_alive(&mut stack) {
+            eprintln!("nav2_costmap_e2e: costmap stack died during startup");
+            std::process::exit(1);
+        }
+        thread::sleep(Duration::from_millis(500));
+    };
+    let mut registry = CallbackRegistry::new();
+    let mut registrations = 0usize;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while registrations == 0 && Instant::now() < deadline {
+        match reader.drain_registration() {
+            Ok(drain) => {
+                registrations = drain.events.len();
+                registry.ingest(&drain);
+            }
+            Err(error) => eprintln!("registration drain error: {error}"),
+        }
+        if registrations == 0 {
+            thread::sleep(Duration::from_secs(1));
+        }
+    }
+    let infos = registry.callback_infos();
+    println!(
+        "startup: {} registration records, {} complete callbacks: {}",
+        registrations,
+        infos.len(),
+        infos
+            .iter()
+            .map(|i| format!("{} [{:?}]", i.name, i.callback_type))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
+    // 3. 主循环。
+    let mut generator = PayloadGenerator::new(vec![interface], GeneratorConfig::default(), config.seed);
+    let mut oracle = BaselineOracle::new(config.latency_factor, config.throughput_floor);
+    println!(
+        "loop: rounds={} seed={} baseline_rounds={} latency_factor={} throughput_floor={}",
+        config.rounds, config.seed, config.baseline, config.latency_factor, config.throughput_floor
+    );
+    let mut crashes = 0u64;
+    let mut new_states = 0u64;
+    let mut invalid = 0u64;
+
+    for round in 1..=config.rounds {
+        if !stack_alive(&mut stack) {
+            println!("round {round:02}: costmap stack is dead, stopping");
+            crashes += 1;
+            break;
+        }
+        let payload = match generator.next_payload() {
+            Ok(payload) => payload,
+            Err(error) => {
+                eprintln!("round {round}: generation failed: {error}");
+                continue;
+            }
+        };
+        write_payload_file(&payload_file, &payload);
+
+        let bridge_command = format!(
+            "source /opt/ros/jazzy/setup.bash && source {} && \
+             export ROS_DOMAIN_ID={ROS_DOMAIN_ID} && \
+             ros2 run r2d2_scan_bridge r2d2_scan_bridge {} {} {}",
+            install_setup.display(),
+            payload_file.display(),
+            config.bridge_rate_hz,
+            config.round_duration_sec
+        );
+        let bridge_status = clean_env(Command::new("bash"))
+            .args(["-c", &bridge_command])
+            .status();
+        match bridge_status {
+            Ok(status) if !status.success() => {
+                eprintln!("round {round}: scan bridge exited with {status}");
+            }
+            Err(error) => eprintln!("round {round}: spawn scan bridge failed: {error}"),
+            Ok(_) => {}
+        }
+
+        let trace = match reader.drain_runtime() {
+            Ok(drain) => profile_trace(&registry, &drain),
+            Err(error) => {
+                eprintln!("round {round}: runtime drain failed: {error}");
+                continue;
+            }
+        };
+
+        let crashed = !stack_alive(&mut stack);
+        let mut new_state = false;
+        if trace.valid_for_state_analysis() {
+            new_state = oracle.decide(&trace, round <= config.baseline);
+        } else {
+            invalid += 1;
+        }
+        if crashed {
+            crashes += 1;
+        }
+        if new_state {
+            new_states += 1;
+        }
+        if crashed || new_state {
+            generator.pool_mut().push(payload.clone());
+        }
+
+        let decision = match (crashed, new_state) {
+            (true, true) => "crash+new-state",
+            (true, false) => "crash",
+            (false, true) => "new-state",
+            (false, false) => "none",
+        };
+        let execs: Vec<String> = trace
+            .call_trace
+            .iter()
+            .take(3)
+            .map(|l| format!("{}ns", l.execution_latency))
+            .collect();
+        let throughputs: Vec<String> = trace
+            .msg_trace
+            .iter()
+            .take(2)
+            .map(|m| format!("{:.2}", m.throughput))
+            .collect();
+        println!(
+            "round {round:02} | len={:4} | calls={} msgs={} | exec=[{}] thr=[{}] | decision={decision:<14} | pool={}",
+            payload.serialized.len(),
+            trace.call_trace.len(),
+            trace.msg_trace.len(),
+            execs.join(","),
+            throughputs.join(","),
+            generator.pool().len(),
+        );
+    }
+
+    // 4. 收尾：整体终止 costmap 栈（进程组）并清理 shm。
+    let _ = Command::new("kill")
+        .args(["--", "-TERM", &format!("-{stack_pid}")])
+        .status();
+    thread::sleep(Duration::from_secs(2));
+    let _ = Command::new("kill")
+        .args(["--", "-KILL", &format!("-{stack_pid}")])
+        .status();
+    let _ = fs::remove_file(SHM_PATH);
+    let _ = fs::remove_file(&payload_file);
+
+    println!("\n=== summary ===");
+    println!(
+        "rounds={} crashes={} new_states={} invalid_traces={} pool_size={}",
+        config.rounds, crashes, new_states, invalid, generator.pool().len()
+    );
+    println!(
+        "callback_graph_edges={} distinct_callbacks={}",
+        oracle.edge_count(),
+        oracle.distinct_callbacks()
+    );
+}

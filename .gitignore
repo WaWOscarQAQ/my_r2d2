@@ -1,3 +1,4 @@
 /target
 /tracer/build
 /.zcode
+/nav2_ws/
