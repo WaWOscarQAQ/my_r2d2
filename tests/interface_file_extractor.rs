@@ -24,14 +24,27 @@ fn parses_real_geometry_msgs_twist_shape_and_dependency() {
     let TypeNode::Nested(fields) = &interface.fields[0].ty else {
         panic!("linear must be a nested Vector3");
     };
-    assert_eq!(fields.iter().map(|field| field.name.as_str()).collect::<Vec<_>>(), ["x", "y", "z"]);
-    assert!(fields.iter().all(|field| field.ty == TypeNode::Primitive(Primitive::F64)));
+    assert_eq!(
+        fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["x", "y", "z"]
+    );
+    assert!(
+        fields
+            .iter()
+            .all(|field| field.ty == TypeNode::Primitive(Primitive::F64))
+    );
 }
 
 #[test]
 fn parses_real_service_request_and_response() {
     let service = fixture("example_interfaces/srv/AddTwoInts.srv");
-    let interface = FileExtractor::from_file(service).extract().unwrap().remove(0);
+    let interface = FileExtractor::from_file(service)
+        .extract()
+        .unwrap()
+        .remove(0);
 
     assert_eq!(interface.name, "AddTwoInts");
     assert_eq!(interface.kind, Kind::Service);
@@ -66,7 +79,10 @@ fn nested<'a>(ty: &'a TypeNode) -> &'a [my_r2d2::interface_extractor::Field] {
     fields
 }
 
-fn find<'a>(fields: &'a [my_r2d2::interface_extractor::Field], name: &str) -> &'a my_r2d2::interface_extractor::Field {
+fn find<'a>(
+    fields: &'a [my_r2d2::interface_extractor::Field],
+    name: &str,
+) -> &'a my_r2d2::interface_extractor::Field {
     fields
         .iter()
         .find(|field| field.name == name)
@@ -88,11 +104,17 @@ fn parses_nav2_load_map_deep_service_tree() {
     let service = interface.service.as_ref().expect("service missing");
     assert_eq!(service.request.len(), 1);
     assert_eq!(service.request[0].name, "map_url");
-    assert_eq!(service.request[0].ty, TypeNode::Primitive(Primitive::String));
+    assert_eq!(
+        service.request[0].ty,
+        TypeNode::Primitive(Primitive::String)
+    );
 
     // response: nav_msgs/OccupancyGrid map; uint8 result
     assert_eq!(service.response.len(), 2);
-    assert_eq!(find(&service.response, "result").ty, TypeNode::Primitive(Primitive::U8));
+    assert_eq!(
+        find(&service.response, "result").ty,
+        TypeNode::Primitive(Primitive::U8)
+    );
 
     // map -> [header, info, data]
     let grid = nested(&find(&service.response, "map").ty);
@@ -100,7 +122,10 @@ fn parses_nav2_load_map_deep_service_tree() {
 
     // header -> [stamp (Time), frame_id]
     let header = nested(&find(grid, "header").ty);
-    assert_eq!(find(header, "frame_id").ty, TypeNode::Primitive(Primitive::String));
+    assert_eq!(
+        find(header, "frame_id").ty,
+        TypeNode::Primitive(Primitive::String)
+    );
     let stamp = nested(&find(header, "stamp").ty);
     assert_eq!(stamp[0].ty, TypeNode::Primitive(Primitive::I32)); // int32 sec
     assert_eq!(stamp[1].ty, TypeNode::Primitive(Primitive::U32)); // uint32 nanosec
@@ -108,7 +133,10 @@ fn parses_nav2_load_map_deep_service_tree() {
     // info (MapMetaData) -> [map_load_time, resolution, width, height, origin]
     let info = nested(&find(grid, "info").ty);
     assert_eq!(info.len(), 5);
-    assert_eq!(find(info, "resolution").ty, TypeNode::Primitive(Primitive::F32));
+    assert_eq!(
+        find(info, "resolution").ty,
+        TypeNode::Primitive(Primitive::F32)
+    );
 
     // origin (Pose) -> [position (Point), orientation (Quaternion)]
     let origin = nested(&find(info, "origin").ty);
@@ -138,13 +166,26 @@ fn parses_sensor_msgs_laser_scan_topic() {
     assert_eq!(interface.fields.len(), 10);
 
     // 8 个 float32 标量
-    for name in ["angle_min", "angle_max", "angle_increment", "time_increment", "scan_time", "range_min", "range_max"] {
-        assert_eq!(find(&interface.fields, name).ty, TypeNode::Primitive(Primitive::F32));
+    for name in [
+        "angle_min",
+        "angle_max",
+        "angle_increment",
+        "time_increment",
+        "scan_time",
+        "range_min",
+        "range_max",
+    ] {
+        assert_eq!(
+            find(&interface.fields, name).ty,
+            TypeNode::Primitive(Primitive::F32)
+        );
     }
     // 两个变长 float32 数组
     for name in ["ranges", "intensities"] {
         match &find(&interface.fields, name).ty {
-            TypeNode::Array(element, None) => assert_eq!(**element, TypeNode::Primitive(Primitive::F32)),
+            TypeNode::Array(element, None) => {
+                assert_eq!(**element, TypeNode::Primitive(Primitive::F32))
+            }
             other => panic!("expected variable array, got {other:?}"),
         }
     }
@@ -256,7 +297,10 @@ fn unresolvable_nested_type_reports_token() {
 #[test]
 fn service_without_separator_is_rejected() {
     let err = extract_err("broken/srv/MissingSep.srv");
-    assert!(err.contains("must contain a line containing only ---"), "got: {err}");
+    assert!(
+        err.contains("must contain a line containing only ---"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -274,8 +318,10 @@ fn byte_and_char_aliases_map_to_u8() {
     assert_eq!(interface.fields.len(), 2);
     assert_eq!(interface.fields[0].name, "data");
     assert_eq!(interface.fields[1].name, "letter");
-    assert!(interface
-        .fields
-        .iter()
-        .all(|field| field.ty == TypeNode::Primitive(Primitive::U8)));
+    assert!(
+        interface
+            .fields
+            .iter()
+            .all(|field| field.ty == TypeNode::Primitive(Primitive::U8))
+    );
 }

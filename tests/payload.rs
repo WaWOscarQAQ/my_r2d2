@@ -7,8 +7,12 @@ use my_r2d2::interface_extractor::{Field, Primitive, TypeNode};
 use my_r2d2::payload::{Error, Serializer, SimpleSerializer, Value, ValueTree};
 
 fn round_trip(value: &ValueTree, ty: &TypeNode) -> ValueTree {
-    let bytes = SimpleSerializer.serialize(value, ty).expect("serialize failed");
-    SimpleSerializer.deserialize(&bytes, ty).expect("deserialize failed")
+    let bytes = SimpleSerializer
+        .serialize(value, ty)
+        .expect("serialize failed");
+    SimpleSerializer
+        .deserialize(&bytes, ty)
+        .expect("deserialize failed")
 }
 
 fn leaf(value: Value) -> ValueTree {
@@ -62,7 +66,11 @@ fn round_trips_every_numeric_primitive() {
         (leaf(Value::F64(f64::MAX)), Primitive::F64.into()),
     ];
     for (value, ty) in cases {
-        assert_eq!(round_trip(&value, &ty), value, "round trip failed for {ty:?}");
+        assert_eq!(
+            round_trip(&value, &ty),
+            value,
+            "round trip failed for {ty:?}"
+        );
     }
 }
 
@@ -74,11 +82,17 @@ fn round_trips_string_and_bytes_with_length_prefix() {
     // u32 小端长度前缀 + UTF-8 字节
     assert_eq!(&bytes[..4], &(value_len(&value)).to_le_bytes());
     assert_eq!(&bytes[4..], b"laser_frame");
-    assert_eq!(round_trip(&value, &ty), leaf(Value::String("laser_frame".to_string())));
+    assert_eq!(
+        round_trip(&value, &ty),
+        leaf(Value::String("laser_frame".to_string()))
+    );
 
     let value = leaf(Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
     let ty: TypeNode = Primitive::Bytes.into();
-    assert_eq!(round_trip(&value, &ty), leaf(Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF])));
+    assert_eq!(
+        round_trip(&value, &ty),
+        leaf(Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]))
+    );
 }
 
 fn value_len(value: &ValueTree) -> u32 {
@@ -104,7 +118,11 @@ fn round_trips_laser_scan_shaped_nested_tree() {
         leaf(Value::F32(0.05)),
         leaf(Value::F32(0.12)),
         leaf(Value::F32(30.0)),
-        ValueTree::Array(vec![leaf(Value::F32(1.0)), leaf(Value::F32(2.5)), leaf(Value::F32(2999.0))]),
+        ValueTree::Array(vec![
+            leaf(Value::F32(1.0)),
+            leaf(Value::F32(2.5)),
+            leaf(Value::F32(2999.0)),
+        ]),
         ValueTree::Array(vec![]), // 空变长数组
     ]);
     let restored = round_trip(&value, &ty);
@@ -154,7 +172,10 @@ fn encoding_nested_with_wrong_field_count_reports_type_mismatch() {
     let value = ValueTree::Nested(vec![leaf(Value::F64(1.0))]);
     let err = SimpleSerializer.serialize(&value, &ty).unwrap_err();
     assert!(matches!(err, Error::TypeMismatch { .. }));
-    assert!(err.to_string().contains("nested message with 2 fields"), "got: {err}");
+    assert!(
+        err.to_string().contains("nested message with 2 fields"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -163,7 +184,10 @@ fn encoding_fixed_array_with_wrong_length_reports_type_mismatch() {
     let value = ValueTree::Array(vec![leaf(Value::U8(1)), leaf(Value::U8(2))]);
     let err = SimpleSerializer.serialize(&value, &ty).unwrap_err();
     assert!(matches!(err, Error::TypeMismatch { .. }));
-    assert!(err.to_string().contains("fixed array of 3 elements"), "got: {err}");
+    assert!(
+        err.to_string().contains("fixed array of 3 elements"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -183,14 +207,20 @@ fn decoding_truncated_numeric_reports_missing_bytes() {
     let ty: TypeNode = Primitive::F64.into();
     let err = SimpleSerializer.deserialize(&[0u8, 1, 2], &ty).unwrap_err();
     assert!(matches!(err, Error::Malformed(_)));
-    assert!(err.to_string().contains("expected 8 bytes, 3 remaining"), "got: {err}");
+    assert!(
+        err.to_string().contains("expected 8 bytes, 3 remaining"),
+        "got: {err}"
+    );
 }
 
 #[test]
 fn decoding_truncated_length_prefix_reports_missing_bytes() {
     let ty: TypeNode = Primitive::String.into();
     let err = SimpleSerializer.deserialize(&[2u8, 0], &ty).unwrap_err();
-    assert!(err.to_string().contains("expected 4 bytes, 2 remaining"), "got: {err}");
+    assert!(
+        err.to_string().contains("expected 4 bytes, 2 remaining"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -199,7 +229,10 @@ fn decoding_string_shorter_than_declared_length_reports_missing_bytes() {
     // 声明长度 10，实际只跟了 2 个字节
     let bytes = [10u8, 0, 0, 0, b'a', b'b'];
     let err = SimpleSerializer.deserialize(&bytes, &ty).unwrap_err();
-    assert!(err.to_string().contains("expected 10 bytes, 2 remaining"), "got: {err}");
+    assert!(
+        err.to_string().contains("expected 10 bytes, 2 remaining"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -217,7 +250,10 @@ fn decoding_fixed_array_with_wrong_count_reports_malformed() {
     let bytes = [3u8, 0, 0, 0, 1, 2, 3];
     let err = SimpleSerializer.deserialize(&bytes, &ty).unwrap_err();
     assert!(matches!(err, Error::Malformed(_)));
-    assert!(err.to_string().contains("expected 4, found 3"), "got: {err}");
+    assert!(
+        err.to_string().contains("expected 4, found 3"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -229,7 +265,10 @@ fn decoding_nested_tree_stops_at_first_truncated_field() {
     ]);
     let bytes = [1u8, 0, 0, 0, 9];
     let err = SimpleSerializer.deserialize(&bytes, &ty).unwrap_err();
-    assert!(err.to_string().contains("expected 4 bytes, 1 remaining"), "got: {err}");
+    assert!(
+        err.to_string().contains("expected 4 bytes, 1 remaining"),
+        "got: {err}"
+    );
 }
 
 #[test]

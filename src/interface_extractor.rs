@@ -225,7 +225,6 @@ struct Parser<'a> {
 
 impl Parser<'_> {
     fn parse_interface(&mut self, path: &Path) -> Result<Interface, Error> {
-        
         let path = canonical(path)?;
 
         let raw = fs::read_to_string(&path);
@@ -239,10 +238,10 @@ impl Parser<'_> {
         };
 
         let package = package_name(&path)?;
-        
+
         let stem = path.file_stem();
         let stem_str = stem.and_then(|s| s.to_str());
-        
+
         let name = match stem_str {
             Some(name) => name.to_string(),
             None => {
@@ -256,7 +255,6 @@ impl Parser<'_> {
         let extension = path.extension().and_then(|s| s.to_str());
 
         let (request, response) = match extension {
-
             Some("srv") => {
                 let sections = split_service(&source)?;
                 (
@@ -274,16 +272,19 @@ impl Parser<'_> {
                 let msg = format!("{} is not a .msg or .srv file", path.display());
                 return Err(Error::new(msg));
             }
-
         };
-        
+
         let is_service = extension == Some("srv");
 
         let name_str = path.display().to_string();
         let self_file = DataFile::new(name_str, source);
         data_files.insert(0, self_file);
 
-        let kind = if is_service { Kind::Service } else { Kind::Topic };
+        let kind = if is_service {
+            Kind::Service
+        } else {
+            Kind::Topic
+        };
 
         let request_fields = request.clone();
         let mut interface = Interface::new(name, kind, request_fields);
@@ -293,7 +294,6 @@ impl Parser<'_> {
             interface = interface.with_service(request, response);
         }
         Ok(interface)
-
     }
 
     fn parse_fields(
@@ -303,17 +303,21 @@ impl Parser<'_> {
         package: &str,
         data_files: &mut Vec<DataFile>,
     ) -> Result<Vec<Field>, Error> {
-
         let mut fields = Vec::new();
 
         for (line_no, raw) in source.lines().enumerate() {
-
             let line = raw.split('#').next().unwrap_or("").trim();
 
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
 
             if line.contains('=') {
-                let error_msg = format!( "{}:{} constants are not represented ", owner.display(), line_no + 1);
+                let error_msg = format!(
+                    "{}:{} constants are not represented ",
+                    owner.display(),
+                    line_no + 1
+                );
                 return Err(Error::new(error_msg));
             }
 
@@ -328,10 +332,14 @@ impl Parser<'_> {
             })?;
 
             if parts.next().is_some() {
-                let msg = format!("{}:{} defaults are not represented by the current model", 
-                                  owner.display(), line_no + 1);
+                let msg = format!(
+                    "{}:{} defaults are not represented by the current model",
+                    owner.display(),
+                    line_no + 1
+                );
                 return Err(Error::new(msg));
             }
+
             fields.push(Field::new(
                 field_name,
                 self.parse_type(type_token, owner, package, data_files)?,

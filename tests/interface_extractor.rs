@@ -39,7 +39,10 @@ fn empty_mock_returns_empty_list() {
 #[test]
 fn type_node_constructors_build_nested_and_array_shapes() {
     let ty = TypeNode::nested(vec![
-        Field::new("point", TypeNode::nested(vec![Field::new("x", Primitive::F64)])),
+        Field::new(
+            "point",
+            TypeNode::nested(vec![Field::new("x", Primitive::F64)]),
+        ),
         Field::new("data", TypeNode::fixed_array(Primitive::U8.into(), 3)),
     ]);
 

@@ -17,7 +17,12 @@ fn fixtures_root() -> PathBuf {
 }
 
 /// 单一算子配置：只放行 `primitive`/`string`/`array`/`nested` 中指定的算子。
-fn forced_config(primitive: &[OpKind], string: &[OpKind], array: &[OpKind], nested: &[OpKind]) -> GeneratorConfig {
+fn forced_config(
+    primitive: &[OpKind],
+    string: &[OpKind],
+    array: &[OpKind],
+    nested: &[OpKind],
+) -> GeneratorConfig {
     let mut config = GeneratorConfig::default();
     config.mutation_energy = 1;
     // 深度 0：只收集根路径，保证单算子命中根节点，断言确定
@@ -49,7 +54,10 @@ fn generate_value_produces_matching_leaf_for_every_primitive() {
     let mut rng = seeded_rng(42);
     let cases: Vec<(Primitive, fn(&Value) -> bool)> = vec![
         (Primitive::Bool, |v| matches!(v, Value::Bool(_))),
-        (Primitive::I8, |v| matches!(v, Value::I8(n) if (-1000..=1000).contains(&(*n as i64)))),
+        (
+            Primitive::I8,
+            |v| matches!(v, Value::I8(n) if (-1000..=1000).contains(&(*n as i64))),
+        ),
         (Primitive::U8, |v| matches!(v, Value::U8(_))),
         (Primitive::I16, |v| matches!(v, Value::I16(_))),
         (Primitive::U16, |v| matches!(v, Value::U16(_))),
@@ -57,17 +65,32 @@ fn generate_value_produces_matching_leaf_for_every_primitive() {
         (Primitive::U32, |v| matches!(v, Value::U32(_))),
         (Primitive::I64, |v| matches!(v, Value::I64(_))),
         (Primitive::U64, |v| matches!(v, Value::U64(_))),
-        (Primitive::F32, |v| matches!(v, Value::F32(x) if (-1000.0..=1000.0).contains(&(*x as f64)))),
-        (Primitive::F64, |v| matches!(v, Value::F64(x) if (-1000.0..=1000.0).contains(x))),
-        (Primitive::String, |v| matches!(v, Value::String(s) if s.len() <= 64 && s.chars().all(|c| (0x20..=0x7e).contains(&(c as u32))))),
-        (Primitive::Bytes, |v| matches!(v, Value::Bytes(b) if b.len() <= 64)),
+        (
+            Primitive::F32,
+            |v| matches!(v, Value::F32(x) if (-1000.0..=1000.0).contains(&(*x as f64))),
+        ),
+        (
+            Primitive::F64,
+            |v| matches!(v, Value::F64(x) if (-1000.0..=1000.0).contains(x)),
+        ),
+        (
+            Primitive::String,
+            |v| matches!(v, Value::String(s) if s.len() <= 64 && s.chars().all(|c| (0x20..=0x7e).contains(&(c as u32)))),
+        ),
+        (
+            Primitive::Bytes,
+            |v| matches!(v, Value::Bytes(b) if b.len() <= 64),
+        ),
     ];
     for (primitive, check) in cases {
         let value = generate_value(&primitive.into(), &mut rng, &config);
         let ValueTree::Leaf(inner) = &value else {
             panic!("{primitive:?} should generate a leaf, got {value:?}");
         };
-        assert!(check(inner), "{primitive:?} generated out-of-range value {inner:?}");
+        assert!(
+            check(inner),
+            "{primitive:?} generated out-of-range value {inner:?}"
+        );
     }
 }
 
@@ -92,14 +115,20 @@ fn generate_value_respects_custom_ranges_and_array_bounds() {
     let value = generate_value(&TypeNode::array(Primitive::F64.into()), &mut rng, &config);
     assert!(matches!(value, ValueTree::Array(items) if items.len() == 5));
 
-    let value = generate_value(&TypeNode::fixed_array(Primitive::U8.into(), 3), &mut rng, &config);
+    let value = generate_value(
+        &TypeNode::fixed_array(Primitive::U8.into(), 3),
+        &mut rng,
+        &config,
+    );
     assert!(matches!(value, ValueTree::Array(items) if items.len() == 3));
 
     let ty = TypeNode::nested(vec![
         Field::new("x", Primitive::F64),
         Field::new("ys", TypeNode::fixed_array(Primitive::U8.into(), 2)),
     ]);
-    assert!(matches!(generate_value(&ty, &mut rng, &config), ValueTree::Nested(items) if items.len() == 2));
+    assert!(
+        matches!(generate_value(&ty, &mut rng, &config), ValueTree::Nested(items) if items.len() == 2)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -110,7 +139,11 @@ fn generate_value_respects_custom_ranges_and_array_bounds() {
 fn flip_inverts_bool_leaf() {
     let config = forced_config(&[OpKind::Flip], &[], &[], &[]);
     let mutator = Mutator::new(config);
-    let out = mutator.mutate(&leaf(Value::Bool(true)), &Primitive::Bool.into(), &mut seeded_rng(1));
+    let out = mutator.mutate(
+        &leaf(Value::Bool(true)),
+        &Primitive::Bool.into(),
+        &mut seeded_rng(1),
+    );
     assert_eq!(out, leaf(Value::Bool(false)));
 }
 
@@ -118,7 +151,11 @@ fn flip_inverts_bool_leaf() {
 fn flip_negates_f64_leaf() {
     let config = forced_config(&[OpKind::Flip], &[], &[], &[]);
     let mutator = Mutator::new(config);
-    let out = mutator.mutate(&leaf(Value::F64(2.5)), &Primitive::F64.into(), &mut seeded_rng(1));
+    let out = mutator.mutate(
+        &leaf(Value::F64(2.5)),
+        &Primitive::F64.into(),
+        &mut seeded_rng(1),
+    );
     assert_eq!(out, leaf(Value::F64(-2.5)));
 }
 
@@ -126,7 +163,11 @@ fn flip_negates_f64_leaf() {
 fn flip_flips_exactly_one_bit_of_i32() {
     let config = forced_config(&[OpKind::Flip], &[], &[], &[]);
     let mutator = Mutator::new(config);
-    let out = mutator.mutate(&leaf(Value::I32(0)), &Primitive::I32.into(), &mut seeded_rng(3));
+    let out = mutator.mutate(
+        &leaf(Value::I32(0)),
+        &Primitive::I32.into(),
+        &mut seeded_rng(3),
+    );
     assert!(matches!(out, ValueTree::Leaf(Value::I32(v)) if v.count_ones() == 1));
 }
 
@@ -134,7 +175,11 @@ fn flip_flips_exactly_one_bit_of_i32() {
 fn flip_preserves_signedness_of_i8() {
     let config = forced_config(&[OpKind::Flip], &[], &[], &[]);
     let mutator = Mutator::new(config);
-    let out = mutator.mutate(&leaf(Value::I8(0)), &Primitive::I8.into(), &mut seeded_rng(5));
+    let out = mutator.mutate(
+        &leaf(Value::I8(0)),
+        &Primitive::I8.into(),
+        &mut seeded_rng(5),
+    );
     assert!(matches!(out, ValueTree::Leaf(Value::I8(v)) if v > 0 && v.count_ones() == 1));
 }
 
@@ -146,7 +191,11 @@ fn flip_preserves_signedness_of_i8() {
 fn boundary_replaces_i32_with_a_range_endpoint() {
     let config = forced_config(&[OpKind::Boundary], &[], &[], &[]);
     let mutator = Mutator::new(config);
-    let out = mutator.mutate(&leaf(Value::I32(7)), &Primitive::I32.into(), &mut seeded_rng(11));
+    let out = mutator.mutate(
+        &leaf(Value::I32(7)),
+        &Primitive::I32.into(),
+        &mut seeded_rng(11),
+    );
     assert!(
         matches!(out, ValueTree::Leaf(Value::I32(v)) if [-1000, 0, 1000].contains(&v)),
         "got {out:?}"
@@ -159,7 +208,11 @@ fn boundary_on_u8_clamps_negative_candidate_to_zero() {
     let mutator = Mutator::new(config);
     // 默认 U8 范围 0..1000，候选 {-1000 的 clamp, 0, 1000 截断为 232}
     for seed in 0..32 {
-        let out = mutator.mutate(&leaf(Value::U8(50)), &Primitive::U8.into(), &mut seeded_rng(seed));
+        let out = mutator.mutate(
+            &leaf(Value::U8(50)),
+            &Primitive::U8.into(),
+            &mut seeded_rng(seed),
+        );
         assert!(
             matches!(out, ValueTree::Leaf(Value::U8(v)) if [0, 232].contains(&v)),
             "seed {seed} got {out:?}"
@@ -170,10 +223,16 @@ fn boundary_on_u8_clamps_negative_candidate_to_zero() {
 #[test]
 fn boundary_returns_value_unchanged_when_all_candidates_equal_current() {
     let mut config = forced_config(&[OpKind::Boundary], &[], &[], &[]);
-    config.per_type_value_ranges.insert(Primitive::I32, ValueRange::new(0.0, 0.0));
+    config
+        .per_type_value_ranges
+        .insert(Primitive::I32, ValueRange::new(0.0, 0.0));
     let mutator = Mutator::new(config);
     // min == 0 == max == 当前值 -> 候选为空，原样返回
-    let out = mutator.mutate(&leaf(Value::I32(0)), &Primitive::I32.into(), &mut seeded_rng(1));
+    let out = mutator.mutate(
+        &leaf(Value::I32(0)),
+        &Primitive::I32.into(),
+        &mut seeded_rng(1),
+    );
     assert_eq!(out, leaf(Value::I32(0)));
 }
 
@@ -184,7 +243,9 @@ fn boundary_returns_value_unchanged_when_all_candidates_equal_current() {
 #[test]
 fn resize_truncates_string_to_configured_length() {
     let mut config = forced_config(&[], &[OpKind::Resize], &[], &[]);
-    config.per_type_value_ranges.insert(Primitive::String, ValueRange::new(3.0, 3.0));
+    config
+        .per_type_value_ranges
+        .insert(Primitive::String, ValueRange::new(3.0, 3.0));
     let mutator = Mutator::new(config);
     let out = mutator.mutate(
         &leaf(Value::String("map://home/robot".to_string())),
@@ -197,7 +258,9 @@ fn resize_truncates_string_to_configured_length() {
 #[test]
 fn resize_grows_bytes_to_configured_length() {
     let mut config = forced_config(&[], &[OpKind::Resize], &[], &[]);
-    config.per_type_value_ranges.insert(Primitive::Bytes, ValueRange::new(5.0, 5.0));
+    config
+        .per_type_value_ranges
+        .insert(Primitive::Bytes, ValueRange::new(5.0, 5.0));
     let mutator = Mutator::new(config);
     let out = mutator.mutate(
         &leaf(Value::Bytes(vec![1, 2])),
@@ -228,8 +291,16 @@ fn resize_resizes_variable_array_to_configured_length() {
 fn resize_cannot_apply_to_fixed_array_and_returns_value_unchanged() {
     let config = forced_config(&[], &[], &[OpKind::Resize], &[]);
     let mutator = Mutator::new(config);
-    let value = ValueTree::Array(vec![leaf(Value::U8(1)), leaf(Value::U8(2)), leaf(Value::U8(3))]);
-    let out = mutator.mutate(&value.clone(), &TypeNode::fixed_array(Primitive::U8.into(), 3), &mut seeded_rng(1));
+    let value = ValueTree::Array(vec![
+        leaf(Value::U8(1)),
+        leaf(Value::U8(2)),
+        leaf(Value::U8(3)),
+    ]);
+    let out = mutator.mutate(
+        &value.clone(),
+        &TypeNode::fixed_array(Primitive::U8.into(), 3),
+        &mut seeded_rng(1),
+    );
     assert_eq!(out, value);
 }
 
@@ -276,7 +347,9 @@ fn resample_regenerates_type_conformant_subtree() {
     let value = ValueTree::Nested(vec![leaf(Value::F64(1.0)), leaf(Value::F64(2.0))]);
     let out = mutator.mutate(&value, &ty, &mut seeded_rng(9));
     // 重新生成的子树必须仍能序列化（形状合规）
-    SimpleSerializer.serialize(&out, &ty).expect("resampled tree must stay type-conformant");
+    SimpleSerializer
+        .serialize(&out, &ty)
+        .expect("resampled tree must stay type-conformant");
 }
 
 #[test]
@@ -347,7 +420,12 @@ fn mutating_load_map_response_traverses_deep_paths() {
         .extract()
         .unwrap()
         .remove(0);
-    let response = interface.service.as_ref().expect("service missing").response.clone();
+    let response = interface
+        .service
+        .as_ref()
+        .expect("service missing")
+        .response
+        .clone();
     let ty = TypeNode::nested(response);
 
     let mut config = GeneratorConfig::default();
@@ -373,5 +451,8 @@ fn mutating_load_map_response_traverses_deep_paths() {
             "round {round}: round trip diverged"
         );
     }
-    assert!(changed, "mutation should change at least one round of the deep tree");
+    assert!(
+        changed,
+        "mutation should change at least one round of the deep tree"
+    );
 }

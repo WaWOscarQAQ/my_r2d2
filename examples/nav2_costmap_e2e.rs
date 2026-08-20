@@ -15,7 +15,7 @@
 //!
 //! 运行：cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42
 
-use my_r2d2::callback_profile::{profile_trace, CallbackRegistry, CallbackTrace};
+use my_r2d2::callback_profile::{CallbackRegistry, CallbackTrace, profile_trace};
 use my_r2d2::interface_extractor::{Extractor, FileExtractor, Interface, Kind};
 use my_r2d2::payload::{Payload, Value, ValueTree};
 use my_r2d2::payload_generator::{GeneratorConfig, PayloadGenerator};
@@ -57,8 +57,7 @@ impl BaselineOracle {
 
     fn observe(&mut self, trace: &CallbackTrace) {
         for latency in &trace.call_trace {
-            *self.latency_sum.entry(latency.callback_id).or_default() +=
-                latency.execution_latency;
+            *self.latency_sum.entry(latency.callback_id).or_default() += latency.execution_latency;
             *self.latency_count.entry(latency.callback_id).or_default() += 1;
         }
         for msg in &trace.msg_trace {
@@ -157,22 +156,42 @@ impl Config {
                 args.next().ok_or_else(|| format!("{flag} needs a value"))
             };
             match arg.as_str() {
-                "--rounds" => config.rounds = value("--rounds")?.parse::<u64>().map_err(|e| e.to_string())?,
-                "--seed" => config.seed = value("--seed")?.parse::<u64>().map_err(|e| e.to_string())?,
-                "--baseline" => config.baseline = value("--baseline")?.parse::<u64>().map_err(|e| e.to_string())?,
+                "--rounds" => {
+                    config.rounds = value("--rounds")?
+                        .parse::<u64>()
+                        .map_err(|e| e.to_string())?
+                }
+                "--seed" => {
+                    config.seed = value("--seed")?.parse::<u64>().map_err(|e| e.to_string())?
+                }
+                "--baseline" => {
+                    config.baseline = value("--baseline")?
+                        .parse::<u64>()
+                        .map_err(|e| e.to_string())?
+                }
                 "--latency-factor" => {
-                    config.latency_factor = value("--latency-factor")?.parse::<f64>().map_err(|e| e.to_string())?
+                    config.latency_factor = value("--latency-factor")?
+                        .parse::<f64>()
+                        .map_err(|e| e.to_string())?
                 }
                 "--throughput-floor" => {
-                    config.throughput_floor = value("--throughput-floor")?.parse::<f64>().map_err(|e| e.to_string())?
+                    config.throughput_floor = value("--throughput-floor")?
+                        .parse::<f64>()
+                        .map_err(|e| e.to_string())?
                 }
                 "--round-duration" => {
-                    config.round_duration_sec = value("--round-duration")?.parse::<f64>().map_err(|e| e.to_string())?
+                    config.round_duration_sec = value("--round-duration")?
+                        .parse::<f64>()
+                        .map_err(|e| e.to_string())?
                 }
                 "--bridge-rate" => {
-                    config.bridge_rate_hz = value("--bridge-rate")?.parse::<u32>().map_err(|e| e.to_string())?
+                    config.bridge_rate_hz = value("--bridge-rate")?
+                        .parse::<u32>()
+                        .map_err(|e| e.to_string())?
                 }
-                "--tsan-log-dir" => config.tsan_log_dir = Some(PathBuf::from(value("--tsan-log-dir")?)),
+                "--tsan-log-dir" => {
+                    config.tsan_log_dir = Some(PathBuf::from(value("--tsan-log-dir")?))
+                }
                 other => return Err(format!("unknown flag {other}")),
             }
         }
@@ -211,10 +230,7 @@ fn scan_params(payload: &Payload) -> (f32, f32, f32, f32, f32, f32, f32, Vec<f32
         return (0.0, 0.0, 0.01, 0.0, 0.05, 0.01, 12.0, vec![]);
     };
     let angle_min = field_f32(fields, 1).clamp(-std::f32::consts::PI, std::f32::consts::PI);
-    let angle_max = field_f32(fields, 2).clamp(
-        angle_min + 0.01,
-        angle_min + std::f32::consts::PI,
-    );
+    let angle_max = field_f32(fields, 2).clamp(angle_min + 0.01, angle_min + std::f32::consts::PI);
     let angle_increment = field_f32(fields, 3).abs().clamp(0.001, 0.35);
     let time_increment = field_f32(fields, 4).abs().min(0.1);
     let scan_time = field_f32(fields, 5).abs().min(0.5);
@@ -296,12 +312,14 @@ fn main() {
     let payload_file = ws.join("payload_round.txt");
     let install_setup = ws.join("install/setup.bash");
     if !install_setup.exists() {
-        eprintln!("nav2_costmap_e2e: {} missing; build nav2_ws first", install_setup.display());
+        eprintln!(
+            "nav2_costmap_e2e: {} missing; build nav2_ws first",
+            install_setup.display()
+        );
         std::process::exit(1);
     }
 
-    let fixtures_root =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ros_interfaces");
+    let fixtures_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ros_interfaces");
     let interface = match extract_laser_scan(&fixtures_root) {
         Ok(interface) => interface,
         Err(message) => {
@@ -312,7 +330,11 @@ fn main() {
     println!(
         "dry run: extracted interface {} ({}) with {} top-level fields",
         interface.name,
-        if interface.kind == Kind::Topic { "topic" } else { "service" },
+        if interface.kind == Kind::Topic {
+            "topic"
+        } else {
+            "service"
+        },
         interface.fields.len()
     );
 
@@ -382,7 +404,8 @@ fn main() {
     );
 
     // 3. 主循环。
-    let mut generator = PayloadGenerator::new(vec![interface], GeneratorConfig::default(), config.seed);
+    let mut generator =
+        PayloadGenerator::new(vec![interface], GeneratorConfig::default(), config.seed);
     let mut oracle = BaselineOracle::new(config.latency_factor, config.throughput_floor);
     println!(
         "loop: rounds={} seed={} baseline_rounds={} latency_factor={} throughput_floor={}",
@@ -495,7 +518,11 @@ fn main() {
     println!("\n=== summary ===");
     println!(
         "rounds={} crashes={} new_states={} invalid_traces={} pool_size={}",
-        config.rounds, crashes, new_states, invalid, generator.pool().len()
+        config.rounds,
+        crashes,
+        new_states,
+        invalid,
+        generator.pool().len()
     );
     println!(
         "callback_graph_edges={} distinct_callbacks={}",

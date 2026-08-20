@@ -18,7 +18,7 @@
 //!
 //! 运行：`cargo run --example end_to_end -- --rounds 15 --seed 42`
 
-use my_r2d2::callback_profile::{profile_trace, CallbackRegistry, CallbackTrace};
+use my_r2d2::callback_profile::{CallbackRegistry, CallbackTrace, profile_trace};
 use my_r2d2::interface_extractor::{Extractor, FileExtractor, Interface, Kind};
 use my_r2d2::payload::Payload;
 use my_r2d2::payload_generator::{GeneratorConfig, PayloadGenerator};
@@ -57,8 +57,7 @@ impl BaselineOracle {
 
     fn observe(&mut self, trace: &CallbackTrace) {
         for latency in &trace.call_trace {
-            *self.latency_sum.entry(latency.callback_id).or_default() +=
-                latency.execution_latency;
+            *self.latency_sum.entry(latency.callback_id).or_default() += latency.execution_latency;
             *self.latency_count.entry(latency.callback_id).or_default() += 1;
         }
         for msg in &trace.msg_trace {
@@ -161,18 +160,31 @@ impl Config {
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
             let mut value = |flag: &str| -> Result<String, String> {
-                args.next()
-                    .ok_or_else(|| format!("{flag} needs a value"))
+                args.next().ok_or_else(|| format!("{flag} needs a value"))
             };
             match arg.as_str() {
-                "--rounds" => config.rounds = value("--rounds")?.parse::<u64>().map_err(|e| e.to_string())?,
-                "--seed" => config.seed = value("--seed")?.parse::<u64>().map_err(|e| e.to_string())?,
-                "--baseline" => config.baseline = value("--baseline")?.parse::<u64>().map_err(|e| e.to_string())?,
+                "--rounds" => {
+                    config.rounds = value("--rounds")?
+                        .parse::<u64>()
+                        .map_err(|e| e.to_string())?
+                }
+                "--seed" => {
+                    config.seed = value("--seed")?.parse::<u64>().map_err(|e| e.to_string())?
+                }
+                "--baseline" => {
+                    config.baseline = value("--baseline")?
+                        .parse::<u64>()
+                        .map_err(|e| e.to_string())?
+                }
                 "--latency-factor" => {
-                    config.latency_factor = value("--latency-factor")?.parse::<f64>().map_err(|e| e.to_string())?
+                    config.latency_factor = value("--latency-factor")?
+                        .parse::<f64>()
+                        .map_err(|e| e.to_string())?
                 }
                 "--throughput-floor" => {
-                    config.throughput_floor = value("--throughput-floor")?.parse::<f64>().map_err(|e| e.to_string())?
+                    config.throughput_floor = value("--throughput-floor")?
+                        .parse::<f64>()
+                        .map_err(|e| e.to_string())?
                 }
                 "--mock-writer" => config.mock_writer = PathBuf::from(value("--mock-writer")?),
                 other => return Err(format!("unknown flag {other}")),
@@ -191,7 +203,10 @@ fn extract_interfaces(fixtures_root: &Path) -> Result<Vec<Interface>, String> {
         "example_interfaces/srv/AddTwoInts.srv",
     ];
     let extractor = FileExtractor::new(
-        files.iter().map(|f| fixtures_root.join(f)).collect::<Vec<_>>(),
+        files
+            .iter()
+            .map(|f| fixtures_root.join(f))
+            .collect::<Vec<_>>(),
         vec![fixtures_root.to_path_buf()],
     );
     extractor.extract().map_err(|e| e.to_string())
@@ -260,9 +275,11 @@ fn run_round(
 
     let shm_path = format!("/dev/shm/{shm_name}");
     let mut reader = TraceReader::open(&shm_path).map_err(|e| e.to_string())?;
-    registry
-        .ingest(&reader.drain_registration().map_err(|e| e.to_string())?);
-    let trace = profile_trace(registry, &reader.drain_runtime().map_err(|e| e.to_string())?);
+    registry.ingest(&reader.drain_registration().map_err(|e| e.to_string())?);
+    let trace = profile_trace(
+        registry,
+        &reader.drain_runtime().map_err(|e| e.to_string())?,
+    );
     drop(reader);
     let _ = std::fs::remove_file(&shm_path);
 
@@ -338,7 +355,15 @@ fn main() {
         interfaces.len(),
         interfaces
             .iter()
-            .map(|i| format!("{} ({})", i.name, if i.kind == Kind::Topic { "topic" } else { "service" }))
+            .map(|i| format!(
+                "{} ({})",
+                i.name,
+                if i.kind == Kind::Topic {
+                    "topic"
+                } else {
+                    "service"
+                }
+            ))
             .collect::<Vec<_>>()
             .join(", ")
     );
@@ -346,7 +371,11 @@ fn main() {
     let mut generator = PayloadGenerator::new(interfaces, GeneratorConfig::default(), config.seed);
     let mut registry = CallbackRegistry::new();
     let mut oracle = BaselineOracle::new(config.latency_factor, config.throughput_floor);
-    let mut stats = Stats { crashes: 0, new_states: 0, invalid: 0 };
+    let mut stats = Stats {
+        crashes: 0,
+        new_states: 0,
+        invalid: 0,
+    };
 
     println!(
         "loop: rounds={} seed={} baseline_rounds={} latency_factor={} throughput_floor={}",
@@ -369,8 +398,17 @@ fn main() {
     }
 
     println!("\n=== summary ===");
-    println!("rounds={} crashes={} new_states={} invalid_traces={} pool_size={}",
-        config.rounds, stats.crashes, stats.new_states, stats.invalid, generator.pool().len());
-    println!("callback_graph_edges={} distinct_callbacks={}",
-        oracle.edge_count(), oracle.distinct_callbacks());
+    println!(
+        "rounds={} crashes={} new_states={} invalid_traces={} pool_size={}",
+        config.rounds,
+        stats.crashes,
+        stats.new_states,
+        stats.invalid,
+        generator.pool().len()
+    );
+    println!(
+        "callback_graph_edges={} distinct_callbacks={}",
+        oracle.edge_count(),
+        oracle.distinct_callbacks()
+    );
 }
