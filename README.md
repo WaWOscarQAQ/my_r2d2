@@ -26,7 +26,7 @@ bash -c 'source /opt/ros/jazzy/setup.bash && colcon build --symlink-install \
   --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo'
 ```
 
-构建成功后 `nav2_ws/install/setup.bash` 存在，`launch_stack.sh` 与 `costmap_params.yaml` 位于 `nav2_ws/` 下。注意：`launch_stack.sh` 目前硬编码了本机路径（路线 A2 会去掉）；仓库挪位置后需同步修改。
+构建成功后 `nav2_ws/install/setup.bash` 存在，`launch_stack.sh` 与 `costmap_params.yaml` 位于 `nav2_ws/` 下。路径不依赖固定目录：仓库挪位置后重编译即可，或用下面的环境变量显式指定（空值视为未设置）。
 
 ### 2. 跑测试
 
@@ -74,6 +74,17 @@ callback_graph_edges=1 distinct_callbacks=1
 | `--lcov-dir nav2_ws/results` | 每轮结束后用 lcov 抓累计分支覆盖落盘（需 lcov；覆盖口径构建见 `docs/plan/nav2_lcov_full_run.md`） |
 | `--tsan-log-dir 目录` | TSAN 构建下把报告写入该目录 |
 | `--round-duration 秒` / `--bridge-rate Hz` | 无 seed-dir 时每轮发布时长与速率 |
+
+### 5. 环境变量（默认值已可跑，仓库挪位置或想换 shm 名时用）
+
+| 变量 | 默认值 | 作用 |
+|---|---|---|
+| `R2D2_WS_ROOT` | 编译期仓库根（`CARGO_MANIFEST_DIR`） | 仓库根，`nav2_ws` 默认取 `<根>/nav2_ws` |
+| `R2D2_NAV2_WS` | `<R2D2_WS_ROOT>/nav2_ws` | nav2 工作区路径（launch 脚本、params、payload 文件都在其下） |
+| `R2D2_ROS_SETUP` | `/opt/ros/jazzy/setup.bash` | ROS 2 setup 脚本（launch 栈与 bridge 都 source 它） |
+| `R2D2_COSTMAP_PARAMS` | `<R2D2_NAV2_WS>/costmap_params.yaml` | costmap 参数文件 |
+| `R2D2_SHM_PATH` | `/dev/shm/r2d2_nav2` | tracer 共享内存路径（C++ tracer 对象名取 basename，Rust 侧同步使用） |
+| `ROS_DOMAIN_ID` | `190` | DDS domain，栈与 bridge 保持一致 |
 
 ## 当前模块
 

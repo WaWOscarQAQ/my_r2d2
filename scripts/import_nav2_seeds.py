@@ -24,7 +24,7 @@ import sys
 
 import yaml
 
-DEFAULT_SOURCE = "/home/ocsar/ROS/nav2-_fuzz"
+DEFAULT_SOURCE = os.environ.get("R2D2_FUZZ_SOURCE", "/home/ocsar/ROS/nav2-_fuzz")
 
 SCAN_DEFAULTS = {
     "angle_min": -3.14159,

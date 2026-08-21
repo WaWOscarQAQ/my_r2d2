@@ -53,6 +53,8 @@
 
 优先级：P0
 
+状态：已完成（2026-08-21）。`examples/nav2_costmap_e2e.rs` 的 SHM 路径、ROS setup、workspace、params、ROS_DOMAIN_ID 全部改为环境变量解析（默认值等价原硬编码）；`nav2_ws/launch_stack.sh` 以 `$0` 所在目录为默认工作区并接受 `R2D2_*` 覆盖；C++ 侧 `costmap_2d_node.cpp` 的 tracer shm 名取 `R2D2_SHM_PATH` basename；`scripts/import_nav2_seeds.py` 默认源支持 `R2D2_FUZZ_SOURCE` 覆盖。README Quickstart 第 5 节收录环境变量表。已用默认方式与显式环境变量方式各实跑验证（见验证记录）。
+
 目标：
 
 - 让仓库不依赖 `/home/ocsar/ROS/my_r2d2` 这一固定目录。

@@ -31,8 +31,22 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-const SHM_PATH: &str = "/dev/shm/r2d2_nav2";
-const ROS_DOMAIN_ID: &str = "190";
+/// 读取环境变量，空值视为未设置，返回默认值。
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+/// 读取路径环境变量（空值视为未设置，默认值兜底）。
+fn env_path(key: &str, default: &Path) -> PathBuf {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default.to_path_buf())
+}
 const RANGES_PER_SCAN: usize = 180;
 /// 每轮最多起几次 scan bridge。bridge 每轮都是全新 DDS participant，发现
 /// 偶尔会吃掉整轮或大部分消息；送达不足期望一半时重跑同一 payload/schedule，
@@ -305,9 +319,9 @@ fn write_payload_file(path: &Path, payload: &Payload) {
     fs::write(path, text).expect("write payload file");
 }
 
-fn clean_env(mut command: Command) -> Command {
+fn clean_env(mut command: Command, domain_id: &str) -> Command {
     command
-        .env("ROS_DOMAIN_ID", ROS_DOMAIN_ID)
+        .env("ROS_DOMAIN_ID", domain_id)
         .env_remove("LD_PRELOAD")
         .env_remove("ASAN_OPTIONS")
         .env_remove("TSAN_OPTIONS")
@@ -323,8 +337,8 @@ fn stack_alive(stack: &mut std::process::Child) -> bool {
 /// gcov 计数只在进程退出或 __gcov_dump() 时落盘；tracer 在 COVERAGE_RUN
 /// 构建下为 SIGUSR1 安装 dump handler。每轮结束由本进程发信号，随后 lcov
 /// 即可读到本轮到当前为止的累计覆盖。
-fn flush_costmap_coverage() {
-    let pid_path = PathBuf::from(SHM_PATH).with_extension("pid");
+fn flush_costmap_coverage(shm: &Path) {
+    let pid_path = shm.with_extension("pid");
     let Ok(pid_text) = fs::read_to_string(&pid_path) else {
         eprintln!("coverage: missing pid file {}", pid_path.display());
         return;
@@ -500,10 +514,26 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let ws = ws_dir();
-    let stack_script = ws.join("launch_stack.sh");
-    let payload_file = ws.join("payload_round.txt");
-    let install_setup = ws.join("install/setup.bash");
+    // 路径全部可由环境变量覆盖，默认取编译期仓库根 + 本机 ROS 安装；
+    // 仓库挪位置后重编译即可，或显式设置 R2D2_NAV2_WS / R2D2_WS_ROOT。
+    let ws_root = std::env::var("R2D2_WS_ROOT")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from);
+    let nav2_ws = env_path(
+        "R2D2_NAV2_WS",
+        &ws_root
+            .map(|root| root.join("nav2_ws"))
+            .unwrap_or_else(ws_dir),
+    );
+    let ros_setup = env_path("R2D2_ROS_SETUP", Path::new("/opt/ros/jazzy/setup.bash"));
+    let costmap_params = env_path("R2D2_COSTMAP_PARAMS", &nav2_ws.join("costmap_params.yaml"));
+    let shm_path = env_path("R2D2_SHM_PATH", Path::new("/dev/shm/r2d2_nav2"));
+    let domain_id = env_or("ROS_DOMAIN_ID", "190");
+
+    let stack_script = nav2_ws.join("launch_stack.sh");
+    let payload_file = nav2_ws.join("payload_round.txt");
+    let install_setup = nav2_ws.join("install/setup.bash");
     if !install_setup.exists() {
         eprintln!(
             "nav2_costmap_e2e: {} missing; build nav2_ws first",
@@ -536,7 +566,11 @@ fn main() {
     stack_command
         .arg("bash")
         .arg(&stack_script)
-        .env("ROS_DOMAIN_ID", ROS_DOMAIN_ID)
+        .env("ROS_DOMAIN_ID", &domain_id)
+        .env("R2D2_ROS_SETUP", &ros_setup)
+        .env("R2D2_NAV2_WS", &nav2_ws)
+        .env("R2D2_COSTMAP_PARAMS", &costmap_params)
+        .env("R2D2_SHM_PATH", &shm_path)
         .env_remove("LD_PRELOAD")
         .env_remove("ASAN_OPTIONS")
         .env_remove("COLCON_CURRENT_PREFIX");
@@ -560,9 +594,9 @@ fn main() {
     println!("stack leader pid = {stack_pid}");
 
     // 2. 等待 costmap 注册回调并 drain 注册记录（超时 30s）。
-    let _ = fs::remove_file(SHM_PATH);
+    let _ = fs::remove_file(&shm_path);
     let mut reader = loop {
-        if let Ok(reader) = TraceReader::open(SHM_PATH) {
+        if let Ok(reader) = TraceReader::open(&shm_path) {
             break reader;
         }
         if !stack_alive(&mut stack) {
@@ -688,10 +722,11 @@ fn main() {
         // setarch -R 关闭 ASLR：TSAN 构建下不关会在内核 6.x 高熵 ASLR 上
         // FATAL（gcc）或静默漏报（clang），与 launch_stack.sh 的处理一致。
         let bridge_command = format!(
-            "source /opt/ros/jazzy/setup.bash && source {} && \
-             export ROS_DOMAIN_ID={ROS_DOMAIN_ID} && \
+            "source {} && source {} && \
+             export ROS_DOMAIN_ID={domain_id} && \
              setarch x86_64 -R ros2 run r2d2_scan_bridge r2d2_scan_bridge {} {rate_hz} {duration_sec} \
              {burst} {burst_gap} {max_publishes} {stamp_mode}",
+            ros_setup.display(),
             install_setup.display(),
             payload_file.display(),
         );
@@ -702,7 +737,7 @@ fn main() {
         let mut trace = None;
         let mut last_delivered = 0u64;
         for attempt in 0..BRIDGE_ATTEMPTS {
-            let bridge_status = clean_env(Command::new("bash"))
+            let bridge_status = clean_env(Command::new("bash"), &domain_id)
                 .args(["-c", &bridge_command])
                 .status();
             match bridge_status {
@@ -807,8 +842,8 @@ fn main() {
 
         if let Some(lcov_root) = &config.lcov_dir {
             let round_dir = lcov_root.join(format!("rounds/round_{round:06}"));
-            flush_costmap_coverage();
-            let stats = capture_round_coverage(&ws, &round_dir, config.gcov_tool.as_deref());
+            flush_costmap_coverage(&shm_path);
+            let stats = capture_round_coverage(&nav2_ws, &round_dir, config.gcov_tool.as_deref());
             let coverage_ok = stats.is_some();
             let (captured, total) = stats.unwrap_or((prev_branches, prev_branches));
             // 累计分支计数只会增长；SIGUSR1 dump 与进行中的回调并发时，快照
@@ -842,8 +877,8 @@ fn main() {
     let _ = Command::new("kill")
         .args(["--", "-KILL", &format!("-{stack_pid}")])
         .status();
-    let _ = fs::remove_file(SHM_PATH);
-    let _ = fs::remove_file(PathBuf::from(SHM_PATH).with_extension("pid"));
+    let _ = fs::remove_file(&shm_path);
+    let _ = fs::remove_file(shm_path.with_extension("pid"));
     let _ = fs::remove_file(&payload_file);
 
     println!("\n=== summary ===");
@@ -864,7 +899,7 @@ fn main() {
 
     // 覆盖收尾：进程组已终止（exit 时 gcov 已做最终 dump），抓总覆盖并出 HTML。
     if let Some(lcov_root) = &config.lcov_dir {
-        match finalize_coverage(&ws, lcov_root, config.gcov_tool.as_deref()) {
+        match finalize_coverage(&nav2_ws, lcov_root, config.gcov_tool.as_deref()) {
             Some((covered, total)) => {
                 println!(
                     "coverage: final branches {covered}/{total} -> {}",
