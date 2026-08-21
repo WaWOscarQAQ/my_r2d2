@@ -124,9 +124,11 @@ Rust 侧 `src/trace_buffer.rs` 读取 `/dev/shm/<name>` 或 fixture 镜像；`te
 ## 当前边界
 
 - 论文明确描述：R2D2 提取 ROS interfaces，按 interface specification 生成 payload，并基于 data files 递归变异曾触发新状态的 payload；只有 crash 或 new-state payload 才进入 pool。
-- 工程边界：`FileExtractor` 已能解析常见 `.msg`/`.srv` 文件，但尚未连接 ROS 2 graph；当前 `Sender`、`StateOracle` 和序列化仍是后续真实运行时接入点。
+- 本仓库在 Jazzy 上只打通了最小闭环（`nav2_costmap_e2e`）：目标仅为单个 `nav2_costmap_2d` 程序，主输入面只有 `/scan`（LaserScan，经 `r2d2_scan_bridge` 发布）；输入面与回调面远小于论文的四个目标系统 + topic/service 全接口矩阵。
+- 插桩在 nav2 应用层（`nav2_ws/src/navigation2` 副本），不是论文的 RCL 层：`executor_execute` 语义不完整、handler 关联为应用层近似、shm 初始化在节点 main。逐条偏差见 `docs/plan/nav2_jazzy_instrumentation_plan.md` 第 4 节。
+- state oracle（`BaselineOracle`）仍是阶段 F 雏形：新执行边 + 延迟/吞吐偏离判据；其中 latency/throughput 判据超出论文边界（论文明确不检测 timing bug）。
+- 覆盖率为 gcc+gcov/lcov 近似，非论文的 clang SanitizerCoverage；叠加 Jazzy 版本、单程序目标、TSAN+coverage 合并构建等口径差异，本仓库的覆盖数字与缺陷统计不能直接对齐论文表格。
 - `FileExtractor` 当前支持基础类型、嵌套消息、无界序列和固定数组；bounded type、常量和字段默认值会明确返回错误，因为现有 `TypeNode` 尚未保存这些约束。
-- tracer 侧以独立模块与 mock 事件源验证 C++/Rust ABI，尚未对真实 rclcpp/rcl 源码插桩（依赖阶段 B 的 Humble/Rolling 源码构建）。
 - 测试替身：mock 只存在于 `tests/`，不会进入正式库的公开 API。
 
 ## Reproduction choice 记录

@@ -124,6 +124,8 @@
 
 优先级：P1
 
+状态：已完成（2026-08-22）。`examples/nav2_costmap_e2e.rs` 头部注释新增边界段（仅 nav2_costmap_2d、主输入面 /scan、应用层插桩、阶段 F 雏形 oracle、gcov 近似覆盖口径），构建命令同步改为 `scripts/build_nav2_ws.sh`；README「当前边界」整节改写，删除「尚未连接 ROS 2 graph」等过时描述，改为按四类边界（目标范围/插桩层/oracle/覆盖口径）逐条说明，均指向对应文档。
+
 目标：
 
 - 避免后续把当前 Jazzy costmap 闭环误写成完整论文复现。

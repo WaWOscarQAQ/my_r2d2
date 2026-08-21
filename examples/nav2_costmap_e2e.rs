@@ -11,7 +11,16 @@
 //!    costmap 进程组死亡记为 crash；crash 或 new state 的 payload 入池。
 //!
 //! 需要先构建 nav2_ws（含 r2d2_tracer、r2d2_scan_bridge）：
-//!   bash nav2_ws 下 colcon build --packages-select r2d2_tracer r2d2_scan_bridge ...
+//!   scripts/build_nav2_ws.sh
+//!
+//! 边界（防止把本 demo 误写成完整论文复现）：
+//! - 目标仅为单个 nav2_costmap_2d 程序，主输入面只有 /scan（LaserScan）
+//! - 插桩在 nav2 应用层（非论文的 RCL 层），逐条偏差见
+//!   docs/plan/nav2_jazzy_instrumentation_plan.md 第 4 节
+//! - state oracle 是阶段 F 雏形（图边 + 延迟/吞吐偏离），其中延迟/吞吐判据
+//!   超出论文边界（论文不检测 timing bug）
+//! - 覆盖率为 gcc+gcov 近似，本 example 的覆盖与缺陷数字不能直接对齐论文
+//!   的 SanitizerCoverage 口径与实验表格
 //!
 //! 运行：cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42
 
