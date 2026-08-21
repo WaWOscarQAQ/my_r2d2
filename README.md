@@ -13,6 +13,14 @@
 - 仅支持 Linux，且依赖 `/dev/shm`（tracer 环形缓冲与 payload 文件都放这里）。
 - 可选：`lcov`（只有加 `--lcov-dir` 抓分支覆盖时才需要）。
 
+### 0. 环境预检（可选）
+
+```bash
+scripts/check_env.sh
+```
+
+检查 ROS setup、ros2/colcon/setarch/Rust 工具链、`/dev/shm` 可写性以及 nav2_ws 是否已搭建构建；必需项不过会以非零退出码收尾并给出排查方向（lcov 缺失只是 WARN，不加 `--lcov-dir` 就不需要）。
+
 ### 1. 构建 nav2_ws
 
 `nav2_ws/` 是 gitignore 的工作区（插桩后的 navigation2 副本 + `r2d2_tracer` + `r2d2_scan_bridge` + 启动脚本）。本机已搭建完成；新机器需按 `docs/plan/nav2_jazzy_instrumentation_plan.md` 第 2、5 节先搭好目录结构再构建。

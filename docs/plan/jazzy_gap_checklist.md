@@ -102,6 +102,8 @@
 
 优先级：P1
 
+状态：已完成（2026-08-22）。落地 `scripts/check_env.sh`：只读预检 Linux 系统、ROS setup 与 ros2（含「不在 PATH 但 setup 内可 source」的判定）、colcon/setarch/Rust 1.85+/lcov（lcov 仅 WARN）、/dev/shm 挂载与可写（写探针文件后删除）、nav2_ws 是否搭建/构建/含 params 与 launch 脚本；必需项失败退出码 1 并附排查方向。已验证：正常环境全绿退出 0，缺失工作区/ROS setup/cargo 场景均正确 FAIL。README Quickstart 新增第 0 步。
+
 目标：
 
 - 在真正运行 example 前，把常见缺依赖或路径问题提前暴露。
