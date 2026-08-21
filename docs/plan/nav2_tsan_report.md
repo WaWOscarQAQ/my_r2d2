@@ -100,3 +100,50 @@ cd nav2_ws && bash -c 'source /opt/ros/jazzy/setup.bash && colcon build \
 cargo run --example nav2_costmap_e2e -- --rounds 25 --seed 7 \
   --round-duration 3.5 --bridge-rate 100 --tsan-log-dir nav2_ws/tsan_reports
 ```
+
+## 8. 第二轮战役（2026-08-21）：TSAN+lcov 合并构建
+
+在「TSAN 与每轮 lcov 分支覆盖同时生效」的目标下重新验证了构建矩阵：
+
+- **clang-18 + TSAN + --coverage 不可用**：clang 的 profile 运行时与 TSAN 组合会
+  让 costmap 执行器在首个扫描后停摆（10s 内 200 条扫描仅 2 个回调执行，之后
+  全部线程 futex 等待；外部观测 /scan 正常在线上）。二分定位到 --coverage 标志
+  本身（TSAN-only 构建 10s 167 回调正常）。COVERAGE_RUN 宏确认只影响 tracer。
+- **gcc + TSAN + --coverage 可用**，但需两个配套修复：
+  1. `-fprofile-update=atomic`：libgcov 计数器默认非原子自增，TSAN 会把计数器
+     更新本身报成 data race（首轮 64MB 报告全是 `__gcov0.*` 全局位置）；
+     原子化后计数器误报清零。
+  2. TSAN_OPTIONS 加 `report_signal_unsafe=0`：轮间 SIGUSR1 → `__gcov_dump()`
+     是有意为之的覆盖落盘模式，默认开启的 signal-unsafe 检查每轮产生数千条
+     保守告警；关闭该类别后报告干净。
+- 报告质量：10 轮战役（语料 + 每轮 lcov）TSAN 报告 16KB、恰好 1 条 data race：
+
+  **真实发现（本轮唯一 race，良性）**：costmap 关闭路径上
+  `Costmap2DROS::mapUpdateLoop`（线程 T17）读 `active_`（costmap_2d_ros.cpp:531）
+  与主线程 `on_deactivate` 写 `active_ = false`（:353）无同步。更新线程随后被
+  join，实际影响良性，但属 nav2 上游真实竞争（未插桩的 /opt 版本同样存在）。
+
+- 战役结果：10 轮、每轮 44–112 回调（TSAN 开销下吞吐下降）、new_states=3、
+  pool=7、crashes=0、invalid_traces=0；最终分支覆盖 8864/129333（6.9%，
+  总分支因 TSAN 插桩膨胀约一倍，与纯 coverage 构建口径不同，不可直接对比）。
+
+## 9. 方案 B 评估（2026-08-21）：clang source-based coverage + TSAN
+
+目标：一次战役同时拿到 TSAN 检测与"源码口径"精确分支覆盖（llvm-cov 只统计
+源码分支，sanitizer 插桩分支不进计数）。评估结论：**本机工具链下不可行，
+维持方案 A（分开构建）**。两个硬限制：
+
+1. **clang profile 插桩 × TSAN 使执行器停摆**：`-fprofile-instr-generate
+   -fcoverage-mapping` + `-fsanitize=thread`（gcov-mode 同理）下，costmap 执行器
+   在激活后不再处理扫描（10s 内 200 条仅 2–5 个回调；strace 显示数据持续到达
+   UDP 层、执行器 waitset 永不被唤醒）。二分定位：问题出在 **nav2_msgs 的
+   rosidl 生成 typesupport**（运行于 FastDDS 接收线程）被插桩——将其排除插桩后
+   174 回调正常（排除生成胶水代码也是合理的产品选择）。gcc TSAN + libgcov 无
+   此问题。
+2. **静态 profile 运行时限制（排除生成代码后仍不可行）**：系统仅有静态
+   libclang_rt.profile（无共享版），每个二进制各带一份运行时。玩具程序证实：
+   进程内 `__llvm_profile_dump()`（无论信号处理器还是辅助线程）只 dump 主映像，
+   **DSO 数据只在各自运行时的进程退出钩子写盘**——而目标代码
+   （nav2_costmap_2d_core.so 等）全部在 DSO 里。因此进程常驻 + 每轮 dump 的
+   模式拿不到目标覆盖；唯一可行形态是每轮重启 costmap（对齐旧 fuzzer 的
+   restart_nav2_each_round=true），经用户决策不采纳，回到方案 A。

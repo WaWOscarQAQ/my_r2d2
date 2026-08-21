@@ -19,7 +19,11 @@ use my_r2d2::callback_profile::{CallbackRegistry, CallbackTrace, profile_trace};
 use my_r2d2::interface_extractor::{Extractor, FileExtractor, Interface, Kind};
 use my_r2d2::payload::{Payload, Value, ValueTree};
 use my_r2d2::payload_generator::{GeneratorConfig, PayloadGenerator};
+use my_r2d2::seed_corpus::{Schedule, load_scan_seeds, load_schedules};
 use my_r2d2::trace_buffer::TraceReader;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+use rand::seq::SliceRandom;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -136,6 +140,13 @@ struct Config {
     bridge_rate_hz: u32,
     /// TSAN 报告输出目录；None 表示不启用 TSAN_OPTIONS 透传。
     tsan_log_dir: Option<PathBuf>,
+    /// 每轮 lcov 分支覆盖结果输出目录；None 表示不抓取覆盖。
+    lcov_dir: Option<PathBuf>,
+    /// nav2-_fuzz 种子语料目录（scans/ 与 schedules/）；None 表示纯生成。
+    seed_dir: Option<PathBuf>,
+    /// lcov 的 --gcov-tool 值（可含空格构成命令行，如
+    /// "/usr/bin/llvm-cov-18 gcov"）；None 表示用 lcov 自动探测。
+    gcov_tool: Option<String>,
 }
 
 impl Config {
@@ -149,6 +160,9 @@ impl Config {
             round_duration_sec: 2.0,
             bridge_rate_hz: 20,
             tsan_log_dir: None,
+            lcov_dir: None,
+            seed_dir: None,
+            gcov_tool: None,
         };
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
@@ -192,6 +206,9 @@ impl Config {
                 "--tsan-log-dir" => {
                     config.tsan_log_dir = Some(PathBuf::from(value("--tsan-log-dir")?))
                 }
+                "--lcov-dir" => config.lcov_dir = Some(PathBuf::from(value("--lcov-dir")?)),
+                "--seed-dir" => config.seed_dir = Some(PathBuf::from(value("--seed-dir")?)),
+                "--gcov-tool" => config.gcov_tool = Some(value("--gcov-tool")?),
                 other => return Err(format!("unknown flag {other}")),
             }
         }
@@ -299,6 +316,154 @@ fn stack_alive(stack: &mut std::process::Child) -> bool {
     matches!(stack.try_wait(), Ok(None))
 }
 
+/// gcov 计数只在进程退出或 __gcov_dump() 时落盘；tracer 在 COVERAGE_RUN
+/// 构建下为 SIGUSR1 安装 dump handler。每轮结束由本进程发信号，随后 lcov
+/// 即可读到本轮到当前为止的累计覆盖。
+fn flush_costmap_coverage() {
+    let pid_path = PathBuf::from(SHM_PATH).with_extension("pid");
+    let Ok(pid_text) = fs::read_to_string(&pid_path) else {
+        eprintln!("coverage: missing pid file {}", pid_path.display());
+        return;
+    };
+    let Ok(pid) = pid_text.trim().parse::<i32>() else {
+        eprintln!("coverage: unparsable pid file {}", pid_path.display());
+        return;
+    };
+    if !Command::new("kill")
+        .args(["-USR1", &pid.to_string()])
+        .status()
+        .is_ok_and(|status| status.success())
+    {
+        eprintln!("coverage: SIGUSR1 to costmap pid {pid} failed");
+    }
+    thread::sleep(Duration::from_millis(500));
+}
+
+/// lcov --summary 的 branches 行（"branches......: 51.0% (1234 of 2420 branches)"）
+/// 解析为 (covered, total)。
+fn branch_totals_from_summary(summary_text: &str) -> Option<(u64, u64)> {
+    let branch_line = summary_text
+        .lines()
+        .find(|line| line.trim_start().starts_with("branches"))?;
+    let open = branch_line.find('(')?;
+    let close = branch_line.find(')')?;
+    let mut parts = branch_line[open + 1..close].split_whitespace();
+    let covered: u64 = parts.next()?.parse().ok()?;
+    if parts.next()? != "of" {
+        return None;
+    }
+    let total: u64 = parts.next()?.parse().ok()?;
+    Some((covered, total))
+}
+
+/// lcov 的 `--gcov-tool` 可多次给出以构成完整命令行（例如 llvm-cov 需要
+/// `--gcov-tool /usr/bin/llvm-cov-18 --gcov-tool gcov`）；`gcov_tool` 的 token
+/// 按空白拆分逐个追加，None 表示交给 lcov 自动探测。
+fn lcov_capture_command(gcov_tool: Option<&str>) -> Command {
+    let mut command = Command::new("lcov");
+    command.arg("--capture");
+    if let Some(tool) = gcov_tool {
+        for token in tool.split_whitespace() {
+            command.args(["--gcov-tool", token]);
+        }
+    }
+    command
+}
+
+/// 抓取一轮累计覆盖：lcov --capture 整个 workspace build 目录，返回
+/// branches (covered, total)；失败返回 None（不影响 fuzzing 主循环）。
+fn capture_round_coverage(
+    ws: &Path,
+    round_dir: &Path,
+    gcov_tool: Option<&str>,
+) -> Option<(u64, u64)> {
+    let build_dir = ws.join("build");
+    fs::create_dir_all(round_dir).ok()?;
+    let info_path = round_dir.join("coverage.info");
+    let status = lcov_capture_command(gcov_tool)
+        .args([
+            "--directory",
+            build_dir.to_str()?,
+            "--rc",
+            "branch_coverage=1",
+            "--ignore-errors",
+            "mismatch,empty,gcov,negative",
+            "--output-file",
+            info_path.to_str()?,
+            "--quiet",
+        ])
+        .status()
+        .ok()?;
+    if !status.success() {
+        eprintln!("coverage: lcov capture failed for {}", round_dir.display());
+        return None;
+    }
+    let summary = Command::new("lcov")
+        .args([
+            "--summary",
+            info_path.to_str()?,
+            "--rc",
+            "branch_coverage=1",
+        ])
+        .output()
+        .ok()?;
+    if !summary.status.success() {
+        return None;
+    }
+    branch_totals_from_summary(&String::from_utf8_lossy(&summary.stdout))
+}
+
+/// 收尾：costmap 进程组终止（exit 时 gcov 做最终 dump）后，抓取总覆盖、
+/// 生成 genhtml HTML 报告，返回最终 branches (covered, total)。
+fn finalize_coverage(ws: &Path, lcov_root: &Path, gcov_tool: Option<&str>) -> Option<(u64, u64)> {
+    let build_dir = ws.join("build");
+    let total_info = lcov_root.join("coverage_total.info");
+    let status = lcov_capture_command(gcov_tool)
+        .args([
+            "--directory",
+            build_dir.to_str()?,
+            "--rc",
+            "branch_coverage=1",
+            "--ignore-errors",
+            "mismatch,empty,gcov,negative",
+            "--output-file",
+            total_info.to_str()?,
+            "--quiet",
+        ])
+        .status()
+        .ok()?;
+    if !status.success() {
+        return None;
+    }
+    let html_dir = lcov_root.join("lcov_html");
+    let _ = fs::remove_dir_all(&html_dir);
+    fs::create_dir_all(&html_dir).ok()?;
+    let _ = Command::new("genhtml")
+        .args([
+            total_info.to_str()?,
+            "--rc",
+            "branch_coverage=1",
+            "--branch-coverage",
+            "--output-directory",
+            html_dir.to_str()?,
+            "--quiet",
+        ])
+        .status();
+    let summary = Command::new("lcov")
+        .args([
+            "--summary",
+            total_info.to_str()?,
+            "--rc",
+            "branch_coverage=1",
+        ])
+        .output()
+        .ok()?;
+    if !summary.status.success() {
+        return None;
+    }
+    branch_totals_from_summary(&String::from_utf8_lossy(&summary.stdout))
+}
+
 fn main() {
     let config = match Config::parse(std::env::args().skip(1)) {
         Ok(config) => config,
@@ -349,10 +514,12 @@ fn main() {
         .env_remove("COLCON_CURRENT_PREFIX");
     if let Some(log_dir) = &config.tsan_log_dir {
         let _ = fs::create_dir_all(log_dir);
+        // report_signal_unsafe=0：本 harness 有意在轮间用 SIGUSR1 触发
+        // __gcov_dump()（见 r2d2_tracer），该类别会在每轮产生海量保守告警。
         stack_command.env(
             "TSAN_OPTIONS",
             format!(
-                "log_path={}/tsan:halt_on_error=0:history_size=7:second_deadlock_stack=1",
+                "log_path={}/tsan:halt_on_error=0:history_size=7:second_deadlock_stack=1:report_signal_unsafe=0",
                 log_dir.display()
             ),
         );
@@ -403,9 +570,41 @@ fn main() {
             .join(", ")
     );
 
-    // 3. 主循环。
+    // 3. 主循环。先在生成器构造前载入种子语料（可选），再用预填后的 pool
+    // 从真实扫描开始变异；发布时序种子决定每轮的 rate/duration/burst。
+    let mut seed_preload: Vec<Payload> = Vec::new();
+    let mut schedules: Vec<(String, Schedule)> = Vec::new();
+    if let Some(seed_dir) = &config.seed_dir {
+        match load_scan_seeds(&seed_dir.join("scans"), &interface) {
+            Ok(seeds) => {
+                println!(
+                    "seeds: {} scan seeds loaded from {}",
+                    seeds.len(),
+                    seed_dir.display()
+                );
+                seed_preload = seeds;
+            }
+            Err(error) => eprintln!("seeds: scan loading failed: {error}"),
+        }
+        match load_schedules(&seed_dir.join("schedules")) {
+            Ok(mut loaded) => {
+                let mut rng = StdRng::seed_from_u64(config.seed ^ 0x9E37_79B9);
+                loaded.shuffle(&mut rng);
+                println!(
+                    "seeds: {} schedules loaded from {}",
+                    loaded.len(),
+                    seed_dir.display()
+                );
+                schedules = loaded;
+            }
+            Err(error) => eprintln!("seeds: schedule loading failed: {error}"),
+        }
+    }
     let mut generator =
         PayloadGenerator::new(vec![interface], GeneratorConfig::default(), config.seed);
+    for seed in seed_preload {
+        generator.pool_mut().push(seed);
+    }
     let mut oracle = BaselineOracle::new(config.latency_factor, config.throughput_floor);
     println!(
         "loop: rounds={} seed={} baseline_rounds={} latency_factor={} throughput_floor={}",
@@ -414,6 +613,10 @@ fn main() {
     let mut crashes = 0u64;
     let mut new_states = 0u64;
     let mut invalid = 0u64;
+    let mut prev_branches: u64 = 0;
+    if let Some(lcov_root) = &config.lcov_dir {
+        let _ = fs::create_dir_all(lcov_root);
+    }
 
     for round in 1..=config.rounds {
         if !stack_alive(&mut stack) {
@@ -430,14 +633,38 @@ fn main() {
         };
         write_payload_file(&payload_file, &payload);
 
+        let schedule_slot = schedules.get((round as usize - 1) % schedules.len().max(1));
+        let (rate_hz, duration_sec, burst, burst_gap, max_publishes, stamp_mode, sched_name) =
+            match schedule_slot {
+                Some((name, schedule)) => (
+                    1000.0 / schedule.period_ms.max(1) as f64,
+                    schedule.duration_sec.clamp(0.1, 300.0),
+                    schedule.burst_count.max(1),
+                    schedule.burst_gap_ms,
+                    schedule.max_publishes,
+                    schedule.stamp_mode.clone(),
+                    Some(name.clone()),
+                ),
+                None => (
+                    config.bridge_rate_hz as f64,
+                    config.round_duration_sec,
+                    1,
+                    0,
+                    0,
+                    "now".to_string(),
+                    None,
+                ),
+            };
+
+        // setarch -R 关闭 ASLR：TSAN 构建下不关会在内核 6.x 高熵 ASLR 上
+        // FATAL（gcc）或静默漏报（clang），与 launch_stack.sh 的处理一致。
         let bridge_command = format!(
             "source /opt/ros/jazzy/setup.bash && source {} && \
              export ROS_DOMAIN_ID={ROS_DOMAIN_ID} && \
-             ros2 run r2d2_scan_bridge r2d2_scan_bridge {} {} {}",
+             setarch x86_64 -R ros2 run r2d2_scan_bridge r2d2_scan_bridge {} {rate_hz} {duration_sec} \
+             {burst} {burst_gap} {max_publishes} {stamp_mode}",
             install_setup.display(),
             payload_file.display(),
-            config.bridge_rate_hz,
-            config.round_duration_sec
         );
         let bridge_status = clean_env(Command::new("bash"))
             .args(["-c", &bridge_command])
@@ -493,15 +720,41 @@ fn main() {
             .take(2)
             .map(|m| format!("{:.2}", m.throughput))
             .collect();
-        println!(
-            "round {round:02} | len={:4} | calls={} msgs={} | exec=[{}] thr=[{}] | decision={decision:<14} | pool={}",
+        let round_line = format!(
+            "round {round:02} | len={:4} | calls={} msgs={} | exec=[{}] thr=[{}] | decision={decision:<14} | pool={} | sched={}",
             payload.serialized.len(),
             trace.call_trace.len(),
             trace.msg_trace.len(),
             execs.join(","),
             throughputs.join(","),
             generator.pool().len(),
+            sched_name.as_deref().unwrap_or("-"),
         );
+        println!("{round_line}");
+
+        if let Some(lcov_root) = &config.lcov_dir {
+            let round_dir = lcov_root.join(format!("rounds/round_{round:06}"));
+            flush_costmap_coverage();
+            let stats = capture_round_coverage(&ws, &round_dir, config.gcov_tool.as_deref());
+            let coverage_ok = stats.is_some();
+            let (covered, total) = stats.unwrap_or((prev_branches, prev_branches));
+            let increase = covered.saturating_sub(prev_branches);
+            prev_branches = covered;
+            let _ = fs::copy(&payload_file, round_dir.join("payload.txt"));
+            let _ = fs::write(round_dir.join("round.txt"), format!("{round_line}\n"));
+            let round_summary = format!(
+                "{{\n  \"round\": {round},\n  \"decision\": \"{decision}\",\n  \"calls\": {},\n  \"msgs\": {},\n  \"pool_size\": {},\n  \"crash_or_hang\": {},\n  \"coverage_ok\": {coverage_ok},\n  \"branch_covered_total\": {covered},\n  \"branch_covered_increase\": {increase}\n}}\n",
+                trace.call_trace.len(),
+                trace.msg_trace.len(),
+                generator.pool().len(),
+                crashed,
+            );
+            let _ = fs::write(round_dir.join("summary.json"), round_summary);
+            println!(
+                "       coverage: branches {covered}/{total} (+{increase}) -> {}",
+                round_dir.display()
+            );
+        }
     }
 
     // 4. 收尾：整体终止 costmap 栈（进程组）并清理 shm。
@@ -513,6 +766,7 @@ fn main() {
         .args(["--", "-KILL", &format!("-{stack_pid}")])
         .status();
     let _ = fs::remove_file(SHM_PATH);
+    let _ = fs::remove_file(PathBuf::from(SHM_PATH).with_extension("pid"));
     let _ = fs::remove_file(&payload_file);
 
     println!("\n=== summary ===");
@@ -529,4 +783,33 @@ fn main() {
         oracle.edge_count(),
         oracle.distinct_callbacks()
     );
+
+    // 覆盖收尾：进程组已终止（exit 时 gcov 已做最终 dump），抓总覆盖并出 HTML。
+    if let Some(lcov_root) = &config.lcov_dir {
+        match finalize_coverage(&ws, lcov_root, config.gcov_tool.as_deref()) {
+            Some((covered, total)) => {
+                println!(
+                    "coverage: final branches {covered}/{total} -> {}",
+                    lcov_root.join("coverage_total.info").display()
+                );
+                let campaign_summary = format!(
+                    "{{\n  \"rounds\": {},\n  \"seed\": {},\n  \"crashes\": {},\n  \"new_states\": {},\n  \"invalid_traces\": {},\n  \"pool_size\": {},\n  \"callback_graph_edges\": {},\n  \"distinct_callbacks\": {},\n  \"coverage_ok\": true,\n  \"branch_covered_total\": {covered}\n}}\n",
+                    config.rounds,
+                    config.seed,
+                    crashes,
+                    new_states,
+                    invalid,
+                    generator.pool().len(),
+                    oracle.edge_count(),
+                    oracle.distinct_callbacks(),
+                );
+                let _ = fs::write(lcov_root.join("summary.json"), campaign_summary);
+                println!(
+                    "coverage: html report -> {}",
+                    lcov_root.join("lcov_html/index.html").display()
+                );
+            }
+            None => eprintln!("coverage: final capture failed"),
+        }
+    }
 }
