@@ -1,0 +1,1 @@
+geometry_msgs/DefinitelyMissing pose

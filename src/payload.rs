@@ -51,7 +51,12 @@ pub struct Payload {
 }
 
 impl Payload {
-    pub fn new(interface_id: impl Into<String>, kind: Kind, value: ValueTree, rng_seed: u64) -> Self {
+    pub fn new(
+        interface_id: impl Into<String>,
+        kind: Kind,
+        value: ValueTree,
+        rng_seed: u64,
+    ) -> Self {
         Self {
             interface_id: interface_id.into(),
             kind,

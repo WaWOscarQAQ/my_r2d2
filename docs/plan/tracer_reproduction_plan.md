@@ -79,7 +79,7 @@
 
 ### 4.2 record 结构
 
-- `RegistrationRecord` 固定 160 字节：`source`（区分 `Rclcpp` 与 `Rcl` 两个 tracer）、`callback_type`、`rclcpp_handler`、`rcl_handler`、`callback_name_len`、`callback_name`（128 字节定长区）。
+- `RegistrationRecord` 固定 160 字节：`source`（区分 `Rclcpp` 与 `Rcl` 两个 tracer）、`callback_type`、`rclcpp_handler`、`rcl_handler`、`callback_name_len`、`flags`、`callback_name`（128 字节定长区）。`flags` 复用原 padding，不改变既有字段偏移。
 - `RuntimeRecord` 固定 56 字节：`event_type`、`rclcpp_handler`、`timestamp`，以及仅对 `rcl_take` 有意义的 `rcl_handler`、`buffer_size`、`pub_timestamp`、`sub_timestamp`。
 - 同一次注册由 `rclcpp_callback_init()` 与 `rcl_callback_init()` 各写一条记录，两者通过 `rcl_handler` 关联，满足阶段 C"通过 handler 关联两层数据"的验收条件。
 - 事件格式与参数 ABI 论文未披露，属缺口；`source` 字段是本计划为区分记录来源而设的 framing choice。
@@ -99,6 +99,7 @@
 - `callback_end()`：写入 `CallbackEnd` 记录，携带 `rclcpp_handler` 与 end timestamp。
 - `rcl_take()`：写入 `RclTake` 记录，携带 `rcl_handler`、`buffer_size`、`pub_timestamp`、`sub_timestamp`。
 - 时间戳由调用点传入（真实插桩时调用 `now_ns()` 获取 `CLOCK_MONOTONIC`）；时钟源为 reproduction choice。
+- 六个热路径 tracer 均不抛异常；shared memory 未初始化时 no-op。callback name 超过定长容量时置 truncated 标志，profile 层不使用截断名称生成 callback ID。初始化阶段的资源错误仍显式报告。
 
 ### 4.5 Rust reader
 
@@ -121,6 +122,7 @@
 - 各 tracepoint 在 rclcpp/rcl 源码中的精确位置、参数 ABI 与事件格式：见第 6 节接入点清单。
 - 时间戳时钟源：`CLOCK_MONOTONIC`。
 - 记录来源区分：`RegistrationRecord::source` 字段。
+- 超长 callback name：定长区截断并置标志；该条注册只用于诊断，不构造论文 Callback ID。
 - 平台假设：小端字节序、`pthread_mutex_t` 为 40 字节（C++ 侧 static_assert 兜底）。
 
 不属本计划的缺口，交叉引用：callback ID hash 算法见 `r2d2_strict_reproduction_plan.md` 阶段 E；shared memory 初始化 tracer 与真实 RCL 层的对接位置见阶段 B 与第 6 节。

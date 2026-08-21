@@ -33,6 +33,7 @@ enum class RuntimeEventType : std::uint32_t {
 
 // Fixed capacity of the callback name field in a registration record.
 inline constexpr std::size_t kCallbackNameCapacity = 128;
+inline constexpr std::uint32_t kRegistrationFlagNameTruncated = 1U;
 
 // One entry in the callback registration buffer. The two registration
 // tracers write the fields they know: rclcpp_callback_init() fills the
@@ -44,7 +45,7 @@ struct RegistrationRecord {
     std::uint64_t rclcpp_handler;
     std::uint64_t rcl_handler;
     std::uint32_t callback_name_len;
-    std::uint32_t padding;
+    std::uint32_t flags;
     char callback_name[kCallbackNameCapacity];
 };
 

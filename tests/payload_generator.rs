@@ -5,7 +5,7 @@ use my_r2d2::interface_extractor::{DataFile, Field, Interface, Kind, Primitive, 
 use my_r2d2::payload::{Error, Payload, Serializer, SimpleSerializer, Value, ValueTree};
 use my_r2d2::payload_generator::{GeneratorConfig, PayloadGenerator, Sender, StateOracle};
 use my_r2d2::payload_pool::PayloadPool;
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 
 /// Records every payload handed to the transport.
 #[derive(Default)]
@@ -40,9 +40,9 @@ impl StateOracle for MockOracle {
 fn twist_interface() -> Interface {
     let vector3 = |prefix: &str| {
         TypeNode::nested(vec![
-            Field::new(format!("{prefix}_x"), "float64"),
-            Field::new(format!("{prefix}_y"), "float64"),
-            Field::new(format!("{prefix}_z"), "float64"),
+            Field::new(format!("{prefix}_x"), Primitive::F64),
+            Field::new(format!("{prefix}_y"), Primitive::F64),
+            Field::new(format!("{prefix}_z"), Primitive::F64),
         ])
     };
     Interface::new(
@@ -66,7 +66,8 @@ fn top_level(interface: &Interface) -> TypeNode {
 #[test]
 fn empty_pool_generates_type_conformant_payload() {
     let interface = twist_interface();
-    let mut generator = PayloadGenerator::new(vec![interface.clone()], GeneratorConfig::default(), 7);
+    let mut generator =
+        PayloadGenerator::new(vec![interface.clone()], GeneratorConfig::default(), 7);
     let payload = generator.next_payload().unwrap();
 
     assert_eq!(payload.interface_id, "/cmd_vel");
@@ -219,11 +220,12 @@ fn string_and_bytes_round_trip() {
         "/chatter",
         Kind::Topic,
         vec![
-            Field::new("frame_id", "string"),
-            Field::new("blob", TypeNode::Primitive(Primitive::Bytes)),
+            Field::new("frame_id", Primitive::String),
+            Field::new("blob", Primitive::Bytes),
         ],
     );
-    let mut generator = PayloadGenerator::new(vec![interface.clone()], GeneratorConfig::default(), 13);
+    let mut generator =
+        PayloadGenerator::new(vec![interface.clone()], GeneratorConfig::default(), 13);
     let payload = generator.next_payload().unwrap();
 
     let restored = SimpleSerializer

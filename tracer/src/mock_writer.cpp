@@ -72,6 +72,44 @@ void write_overflow_sequence(std::uint64_t registration_capacity,
   }
 }
 
+// One fuzzing round for the Rust end-to-end example: the fixed two-callback
+// registration plus a single runtime cycle whose callback latencies, message
+// size and timer participation are controlled by the caller. The Rust side
+// derives them deterministically from the payload under test.
+void write_live_sequence(std::uint64_t sched_sub, std::uint64_t exec_sub,
+                         std::uint64_t sched_timer, std::uint64_t exec_timer,
+                         std::uint64_t buffer_size, std::uint64_t pub_timestamp,
+                         std::uint64_t sub_timestamp, bool skip_timer) {
+  tracer::rclcpp_callback_init(reinterpret_cast<const void*>(kSubscriptionRclcppHandler),
+                               reinterpret_cast<const void*>(kSubscriptionRclHandler),
+                               tracer::CallbackType::Subscription);
+  tracer::rcl_callback_init("/cmd_vel_callback",
+                            reinterpret_cast<const void*>(kSubscriptionRclHandler));
+  tracer::rclcpp_callback_init(reinterpret_cast<const void*>(kTimerRclcppHandler),
+                               reinterpret_cast<const void*>(kTimerRclHandler),
+                               tracer::CallbackType::Timer);
+  tracer::rcl_callback_init("timer_callback", reinterpret_cast<const void*>(kTimerRclHandler));
+
+  constexpr std::uint64_t kInvokeSub = 100;
+  constexpr std::uint64_t kInvokeTimer = 400;
+  tracer::executor_execute(reinterpret_cast<const void*>(kSubscriptionRclcppHandler),
+                           kInvokeSub);
+  tracer::callback_start(reinterpret_cast<const void*>(kSubscriptionRclcppHandler),
+                         kInvokeSub + sched_sub);
+  tracer::callback_end(reinterpret_cast<const void*>(kSubscriptionRclcppHandler),
+                       kInvokeSub + sched_sub + exec_sub);
+  tracer::rcl_take(reinterpret_cast<const void*>(kSubscriptionRclHandler), buffer_size,
+                   pub_timestamp, sub_timestamp);
+  if (!skip_timer) {
+    tracer::executor_execute(reinterpret_cast<const void*>(kTimerRclcppHandler),
+                             kInvokeTimer);
+    tracer::callback_start(reinterpret_cast<const void*>(kTimerRclcppHandler),
+                           kInvokeTimer + sched_timer);
+    tracer::callback_end(reinterpret_cast<const void*>(kTimerRclcppHandler),
+                         kInvokeTimer + sched_timer + exec_timer);
+  }
+}
+
 void dump_fixture(const std::string& path, std::uint64_t registration_capacity,
                   std::uint64_t runtime_capacity) {
   const auto* image = static_cast<const std::uint8_t*>(tracer::image());
@@ -103,6 +141,16 @@ int main(int argc, char** argv) {
   std::uint64_t runtime_capacity = 8;
   bool overflow = false;
   bool cleanup = false;
+  bool live = false;
+  bool skip_timer = false;
+  bool crash = false;
+  std::uint64_t sched_sub = 10;
+  std::uint64_t exec_sub = 100;
+  std::uint64_t sched_timer = 10;
+  std::uint64_t exec_timer = 100;
+  std::uint64_t buffer_size = 512;
+  std::uint64_t pub_timestamp = 50;
+  std::uint64_t sub_timestamp = 90;
 
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
@@ -123,6 +171,26 @@ int main(int argc, char** argv) {
       overflow = true;
     } else if (arg == "--cleanup") {
       cleanup = true;
+    } else if (arg == "--live") {
+      live = true;
+    } else if (arg == "--sched-sub") {
+      sched_sub = std::stoull(next_value("--sched-sub"));
+    } else if (arg == "--exec-sub") {
+      exec_sub = std::stoull(next_value("--exec-sub"));
+    } else if (arg == "--sched-timer") {
+      sched_timer = std::stoull(next_value("--sched-timer"));
+    } else if (arg == "--exec-timer") {
+      exec_timer = std::stoull(next_value("--exec-timer"));
+    } else if (arg == "--size") {
+      buffer_size = std::stoull(next_value("--size"));
+    } else if (arg == "--pub") {
+      pub_timestamp = std::stoull(next_value("--pub"));
+    } else if (arg == "--sub") {
+      sub_timestamp = std::stoull(next_value("--sub"));
+    } else if (arg == "--no-timer") {
+      skip_timer = true;
+    } else if (arg == "--crash") {
+      crash = true;
     } else if (arg.rfind("--", 0) == 0) {
       std::cerr << "unknown flag: " << arg << std::endl;
       return 2;
@@ -137,13 +205,20 @@ int main(int argc, char** argv) {
   if (shm_name.empty()) {
     std::cerr << "usage: mock_writer <shm_name> [--fixture <path>]"
               << " [--reg-capacity N] [--runtime-capacity N]"
-              << " [--overflow] [--cleanup]" << std::endl;
+              << " [--overflow] [--cleanup]" << std::endl
+              << "       mock_writer <shm_name> --live [--sched-sub N]"
+              << " [--exec-sub N] [--sched-timer N] [--exec-timer N]"
+              << " [--size N] [--pub N] [--sub N] [--no-timer] [--crash]"
+              << std::endl;
     return 2;
   }
 
   try {
     tracer::init(shm_name.c_str(), registration_capacity, runtime_capacity);
-    if (overflow) {
+    if (live) {
+      write_live_sequence(sched_sub, exec_sub, sched_timer, exec_timer, buffer_size,
+                          pub_timestamp, sub_timestamp, skip_timer);
+    } else if (overflow) {
       write_overflow_sequence(registration_capacity, runtime_capacity);
     } else {
       write_sequence();
@@ -159,5 +234,7 @@ int main(int argc, char** argv) {
   if (cleanup) {
     shm_unlink(shm_name.c_str());
   }
-  return 0;
+  // 139 mimics a SIGSEGV exit, used by the end-to-end example to simulate
+  // a system crash after the trace for this round was fully written.
+  return crash ? 139 : 0;
 }

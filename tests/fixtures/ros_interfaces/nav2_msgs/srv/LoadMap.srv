@@ -1,0 +1,5 @@
+# Real nav2_msgs/srv/LoadMap.srv definition (常量行省略：当前模型不支持 '=')。
+string map_url
+---
+nav_msgs/OccupancyGrid map
+uint8 result

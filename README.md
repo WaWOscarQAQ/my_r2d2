@@ -4,12 +4,13 @@
 
 ## 当前模块
 
-- `interface_extractor`：interface 提取边界与递归类型树（`TypeNode`），只覆盖 topic 与 service。
+- `interface_extractor`：递归类型树（`TypeNode`）以及 `FileExtractor`，可从真实 `.msg`/`.srv` 文件提取 topic/service 接口、嵌套消息依赖和 service request/response。
 - `payload`：`Payload` 数据模型、`ValueTree` 值树与 `Serializer` 序列化边界（`SimpleSerializer` 为 reproduction choice）。
 - `payload_pool`：interesting payload pool，只允许 crash 或 new-state payload 入池。
 - `mutation`：递归变异器（`Mutator`）与类型正确生成（`generate_value`）。
 - `payload_generator`：每轮分支决策（空池生成 / 非空池变异）、`GeneratorConfig`，以及 `Sender`、`StateOracle` trait 边界。
 - `trace_buffer`：shared memory reader，解析 C++ tracer 写入的 registration 与 runtime 环形缓冲（阶段 C/D 的 Rust 侧读取端）。
+- `callback_profile`：跨 drain 合并完整注册信息，按论文 Figure 5 生成 callback ID、latency 与 throughput，并阻止丢失、冲突、截断或时序异常的 trace 进入后续状态反馈。
 
 ## tracer 模块（阶段 C/D，C++ 侧）
 
@@ -29,7 +30,8 @@ Rust 侧 `src/trace_buffer.rs` 读取 `/dev/shm/<name>` 或 fixture 镜像；`te
 ## 当前边界
 
 - 论文明确描述：R2D2 提取 ROS interfaces，按 interface specification 生成 payload，并基于 data files 递归变异曾触发新状态的 payload；只有 crash 或 new-state payload 才进入 pool。
-- 工程占位实现：尚未连接 ROS 2 graph，不解析 `.msg`、`.srv` 文件，不发送真实 topic/service 消息；`Sender` 与 `StateOracle` 只有 trait 定义，真实实现待阶段 H 接入。
+- 工程边界：`FileExtractor` 已能解析常见 `.msg`/`.srv` 文件，但尚未连接 ROS 2 graph；当前 `Sender`、`StateOracle` 和序列化仍是后续真实运行时接入点。
+- `FileExtractor` 当前支持基础类型、嵌套消息、无界序列和固定数组；bounded type、常量和字段默认值会明确返回错误，因为现有 `TypeNode` 尚未保存这些约束。
 - tracer 侧以独立模块与 mock 事件源验证 C++/Rust ABI，尚未对真实 rclcpp/rcl 源码插桩（依赖阶段 B 的 Humble/Rolling 源码构建）。
 - 测试替身：mock 只存在于 `tests/`，不会进入正式库的公开 API。
 
@@ -50,6 +52,7 @@ Rust 侧 `src/trace_buffer.rs` 读取 `/dev/shm/<name>` 或 fixture 镜像；`te
 | 环形溢出行为 | 覆盖最旧记录并递增 `overflow_count` | `RingHeader` |
 | 时间戳时钟源 | `CLOCK_MONOTONIC` | `tracer::now_ns()` |
 | 记录来源区分 | `RegistrationSource`（Rclcpp / Rcl） | `trace_records.h` |
+| 超长 callback name | 定长区截断并置标志；截断名称不参与 callback ID 生成 | `trace_records.h` / `callback_profile` |
 | 平台假设 | 小端、x86-64 下 `pthread_mutex_t` 为 40 字节（C++ static_assert 兜底）、对齐 8 字节读取按实践原子 | `trace_buffer` 模块 |
 
 ## 运行测试
