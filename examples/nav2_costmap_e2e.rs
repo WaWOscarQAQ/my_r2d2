@@ -34,6 +34,10 @@ use std::time::{Duration, Instant};
 const SHM_PATH: &str = "/dev/shm/r2d2_nav2";
 const ROS_DOMAIN_ID: &str = "190";
 const RANGES_PER_SCAN: usize = 180;
+/// 每轮最多起几次 scan bridge。bridge 每轮都是全新 DDS participant，发现
+/// 偶尔会吃掉整轮消息；空轮重跑同一 payload/schedule，不把「没送到」当成
+/// 「没触发」。
+const BRIDGE_ATTEMPTS: u32 = 3;
 
 /// 阶段 F 雏形（与 end_to_end example 相同的三指标判定）。
 struct BaselineOracle {
@@ -370,6 +374,17 @@ fn lcov_capture_command(gcov_tool: Option<&str>) -> Command {
     command
 }
 
+/// 累计分支计数只增不减。SIGUSR1 触发的 `__gcov_dump()` 与进行中的回调
+/// 并发执行时，快照会漏掉该回调尚未走到的分支，导致读数低于上一轮；此时
+/// 以上一轮读数作为累计下界，并标记本轮捕获为 dip。
+fn cumulative_branches(captured: u64, previous: u64) -> (u64, bool) {
+    if captured < previous {
+        (previous, true)
+    } else {
+        (captured, false)
+    }
+}
+
 /// 抓取一轮累计覆盖：lcov --capture 整个 workspace build 目录，返回
 /// branches (covered, total)；失败返回 None（不影响 fuzzing 主循环）。
 fn capture_round_coverage(
@@ -613,6 +628,7 @@ fn main() {
     let mut crashes = 0u64;
     let mut new_states = 0u64;
     let mut invalid = 0u64;
+    let mut empty_rounds = 0u64;
     let mut prev_branches: u64 = 0;
     if let Some(lcov_root) = &config.lcov_dir {
         let _ = fs::create_dir_all(lcov_root);
@@ -666,28 +682,46 @@ fn main() {
             install_setup.display(),
             payload_file.display(),
         );
-        let bridge_status = clean_env(Command::new("bash"))
-            .args(["-c", &bridge_command])
-            .status();
-        match bridge_status {
-            Ok(status) if !status.success() => {
-                eprintln!("round {round}: scan bridge exited with {status}");
+        let mut trace = None;
+        for attempt in 0..BRIDGE_ATTEMPTS {
+            let bridge_status = clean_env(Command::new("bash"))
+                .args(["-c", &bridge_command])
+                .status();
+            match bridge_status {
+                Ok(status) if !status.success() => {
+                    eprintln!("round {round}: scan bridge exited with {status}");
+                }
+                Err(error) => eprintln!("round {round}: spawn scan bridge failed: {error}"),
+                Ok(_) => {}
             }
-            Err(error) => eprintln!("round {round}: spawn scan bridge failed: {error}"),
-            Ok(_) => {}
-        }
-
-        let trace = match reader.drain_runtime() {
-            Ok(drain) => profile_trace(&registry, &drain),
-            Err(error) => {
-                eprintln!("round {round}: runtime drain failed: {error}");
+            let drained = match reader.drain_runtime() {
+                Ok(drain) => profile_trace(&registry, &drain),
+                Err(error) => {
+                    eprintln!("round {round}: runtime drain failed: {error}");
+                    break;
+                }
+            };
+            let delivered = !drained.call_trace.is_empty() || !drained.msg_trace.is_empty();
+            if !delivered && stack_alive(&mut stack) && attempt + 1 < BRIDGE_ATTEMPTS {
+                eprintln!(
+                    "round {round}: no callbacks or messages observed (attempt {}), respawning bridge",
+                    attempt + 1
+                );
                 continue;
             }
+            trace = Some(drained);
+            break;
+        }
+        let Some(trace) = trace else {
+            continue;
         };
 
         let crashed = !stack_alive(&mut stack);
+        let empty = trace.call_trace.is_empty() && trace.msg_trace.is_empty();
         let mut new_state = false;
-        if trace.valid_for_state_analysis() {
+        if empty && !crashed {
+            empty_rounds += 1;
+        } else if trace.valid_for_state_analysis() {
             new_state = oracle.decide(&trace, round <= config.baseline);
         } else {
             invalid += 1;
@@ -702,11 +736,18 @@ fn main() {
             generator.pool_mut().push(payload.clone());
         }
 
-        let decision = match (crashed, new_state) {
-            (true, true) => "crash+new-state",
-            (true, false) => "crash",
-            (false, true) => "new-state",
-            (false, false) => "none",
+        let decision = if crashed {
+            if new_state {
+                "crash+new-state"
+            } else {
+                "crash"
+            }
+        } else if empty {
+            "empty"
+        } else if new_state {
+            "new-state"
+        } else {
+            "none"
         };
         let execs: Vec<String> = trace
             .call_trace
@@ -718,10 +759,12 @@ fn main() {
             .msg_trace
             .iter()
             .take(2)
-            .map(|m| format!("{:.2}", m.throughput))
+            // throughput 内部单位是 bytes/ns（buffer_size / 耗时）；×1e3 换算
+            // 为 MB/s，否则日志里几乎所有值都四舍五入成 0.00。
+            .map(|m| format!("{:.2}", m.throughput * 1e3))
             .collect();
         let round_line = format!(
-            "round {round:02} | len={:4} | calls={} msgs={} | exec=[{}] thr=[{}] | decision={decision:<14} | pool={} | sched={}",
+            "round {round:02} | len={:4} | calls={} msgs={} | exec=[{}] thr=[{}] MB/s | decision={decision:<14} | pool={} | sched={}",
             payload.serialized.len(),
             trace.call_trace.len(),
             trace.msg_trace.len(),
@@ -737,8 +780,11 @@ fn main() {
             flush_costmap_coverage();
             let stats = capture_round_coverage(&ws, &round_dir, config.gcov_tool.as_deref());
             let coverage_ok = stats.is_some();
-            let (covered, total) = stats.unwrap_or((prev_branches, prev_branches));
-            let increase = covered.saturating_sub(prev_branches);
+            let (captured, total) = stats.unwrap_or((prev_branches, prev_branches));
+            // 累计分支计数只会增长；SIGUSR1 dump 与进行中的回调并发时，快照
+            // 会漏掉该回调尚未走到的分支，读数低于上一轮。以上一轮为下界。
+            let (covered, dipped) = cumulative_branches(captured, prev_branches);
+            let increase = covered - prev_branches;
             prev_branches = covered;
             let _ = fs::copy(&payload_file, round_dir.join("payload.txt"));
             let _ = fs::write(round_dir.join("round.txt"), format!("{round_line}\n"));
@@ -751,7 +797,8 @@ fn main() {
             );
             let _ = fs::write(round_dir.join("summary.json"), round_summary);
             println!(
-                "       coverage: branches {covered}/{total} (+{increase}) -> {}",
+                "       coverage: branches {covered}/{total} (+{increase}){} -> {}",
+                if dipped { " [dip clamped]" } else { "" },
                 round_dir.display()
             );
         }
@@ -771,11 +818,12 @@ fn main() {
 
     println!("\n=== summary ===");
     println!(
-        "rounds={} crashes={} new_states={} invalid_traces={} pool_size={}",
+        "rounds={} crashes={} new_states={} invalid_traces={} empty_rounds={} pool_size={}",
         config.rounds,
         crashes,
         new_states,
         invalid,
+        empty_rounds,
         generator.pool().len()
     );
     println!(
@@ -793,12 +841,13 @@ fn main() {
                     lcov_root.join("coverage_total.info").display()
                 );
                 let campaign_summary = format!(
-                    "{{\n  \"rounds\": {},\n  \"seed\": {},\n  \"crashes\": {},\n  \"new_states\": {},\n  \"invalid_traces\": {},\n  \"pool_size\": {},\n  \"callback_graph_edges\": {},\n  \"distinct_callbacks\": {},\n  \"coverage_ok\": true,\n  \"branch_covered_total\": {covered}\n}}\n",
+                    "{{\n  \"rounds\": {},\n  \"seed\": {},\n  \"crashes\": {},\n  \"new_states\": {},\n  \"invalid_traces\": {},\n  \"empty_rounds\": {},\n  \"pool_size\": {},\n  \"callback_graph_edges\": {},\n  \"distinct_callbacks\": {},\n  \"coverage_ok\": true,\n  \"branch_covered_total\": {covered}\n}}\n",
                     config.rounds,
                     config.seed,
                     crashes,
                     new_states,
                     invalid,
+                    empty_rounds,
                     generator.pool().len(),
                     oracle.edge_count(),
                     oracle.distinct_callbacks(),
@@ -811,5 +860,36 @@ fn main() {
             }
             None => eprintln!("coverage: final capture failed"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{branch_totals_from_summary, cumulative_branches};
+
+    #[test]
+    fn branch_totals_parses_typical_summary() {
+        let summary = "\
+Summary coverage rate:
+  lines......: 51.0% (1234 of 2420 lines)
+  functions..: 60.0% (12 of 20 functions)
+  branches......: 51.0% (1234 of 2420 branches)
+";
+        assert_eq!(branch_totals_from_summary(summary), Some((1234, 2420)));
+    }
+
+    #[test]
+    fn branch_totals_rejects_missing_branch_line() {
+        assert_eq!(
+            branch_totals_from_summary("lines......: 1.0% (1 of 1 lines)"),
+            None
+        );
+    }
+
+    #[test]
+    fn cumulative_branches_clamps_dips() {
+        assert_eq!(cumulative_branches(100, 90), (100, false));
+        assert_eq!(cumulative_branches(80, 90), (90, true));
+        assert_eq!(cumulative_branches(90, 90), (90, false));
     }
 }
