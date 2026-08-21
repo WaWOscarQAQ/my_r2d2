@@ -81,6 +81,8 @@
 
 优先级：P0
 
+状态：已完成（2026-08-22）。落地 `scripts/build_nav2_ws.sh`：收口 plain / coverage(1a) / tsan(1b) 三种构建口径；构建前检查 ROS setup、工作区、`r2d2_tracer`/`r2d2_scan_bridge`/插桩 navigation2/params 是否就位与 colcon 是否可用；记录上次模式并在未 `--clean` 切换时拒绝；`--clean` 清理对应包产物；覆盖/TSAN 构建后提示清 `.gcda`；踩坑处理（setup.bash 的 set -u、COLCON_CURRENT_PREFIX）内建。已验证：plain 与 tsan 两种模式各全量构建并实跑 e2e 通过，模式切换守卫生效。README Quickstart 第 1 步改为脚本入口。
+
 目标：
 
 - 把当前散落在文档里的 `colcon build` 命令收口成一个入口。

@@ -15,15 +15,17 @@
 
 ### 1. 构建 nav2_ws
 
-`nav2_ws/` 是 gitignore 的工作区（插桩后的 navigation2 副本 + `r2d2_tracer` + `r2d2_scan_bridge` + 启动脚本）。本机已搭建完成；新机器需按 `docs/plan/nav2_jazzy_instrumentation_plan.md` 第 2、5 节先搭好目录结构再执行下面的构建（脚本化收纳在路线 A3）。
+`nav2_ws/` 是 gitignore 的工作区（插桩后的 navigation2 副本 + `r2d2_tracer` + `r2d2_scan_bridge` + 启动脚本）。本机已搭建完成；新机器需按 `docs/plan/nav2_jazzy_instrumentation_plan.md` 第 2、5 节先搭好目录结构再构建。
 
 ```bash
-cd nav2_ws
-bash -c 'source /opt/ros/jazzy/setup.bash && colcon build --symlink-install \
-  --parallel-workers 12 \
-  --packages-select r2d2_tracer r2d2_scan_bridge nav2_msgs nav2_common \
-                     nav2_util nav2_voxel_grid nav2_costmap_2d \
-  --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo'
+scripts/build_nav2_ws.sh
+```
+
+一键脚本会先检查工作区与依赖是否就位，再做普通 RelWithDebInfo 构建。构建口径切换（需干净重建，约 2-3 分钟）：
+
+```bash
+scripts/build_nav2_ws.sh --clean --coverage   # 纯 coverage 构建（论文覆盖口径近似）
+scripts/build_nav2_ws.sh --clean --tsan       # TSAN + coverage（并发检测战役）
 ```
 
 构建成功后 `nav2_ws/install/setup.bash` 存在，`launch_stack.sh` 与 `costmap_params.yaml` 位于 `nav2_ws/` 下。路径不依赖固定目录：仓库挪位置后重编译即可，或用下面的环境变量显式指定（空值视为未设置）。
