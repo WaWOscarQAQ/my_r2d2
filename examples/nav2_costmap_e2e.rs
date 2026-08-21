@@ -35,8 +35,8 @@ const SHM_PATH: &str = "/dev/shm/r2d2_nav2";
 const ROS_DOMAIN_ID: &str = "190";
 const RANGES_PER_SCAN: usize = 180;
 /// 每轮最多起几次 scan bridge。bridge 每轮都是全新 DDS participant，发现
-/// 偶尔会吃掉整轮消息；空轮重跑同一 payload/schedule，不把「没送到」当成
-/// 「没触发」。
+/// 偶尔会吃掉整轮或大部分消息；送达不足期望一半时重跑同一 payload/schedule，
+/// 不把「没送到」当成「没触发」。
 const BRIDGE_ATTEMPTS: u32 = 3;
 
 /// 阶段 F 雏形（与 end_to_end example 相同的三指标判定）。
@@ -385,6 +385,19 @@ fn cumulative_branches(captured: u64, previous: u64) -> (u64, bool) {
     }
 }
 
+/// 按 bridge 的发布循环推算一轮期望消息数：tick 数 × burst，受
+/// `max_publishes` 封顶（0 表示不封顶），与 r2d2_scan_bridge 的
+/// `total_ticks`/`published` 逻辑保持一致。
+fn expected_publishes(rate_hz: f64, duration_sec: f64, burst: u32, max_publishes: u64) -> u64 {
+    let ticks = (rate_hz * duration_sec) as u64;
+    let uncapped = ticks.saturating_mul(burst as u64);
+    if max_publishes > 0 {
+        uncapped.min(max_publishes)
+    } else {
+        uncapped
+    }
+}
+
 /// 抓取一轮累计覆盖：lcov --capture 整个 workspace build 目录，返回
 /// branches (covered, total)；失败返回 None（不影响 fuzzing 主循环）。
 fn capture_round_coverage(
@@ -682,7 +695,12 @@ fn main() {
             install_setup.display(),
             payload_file.display(),
         );
+        // 每轮 bridge 都是全新的 DDS participant，发现偶尔会吃掉整轮消息
+        // （300 轮战役里有 2 轮 0 消息、16 轮不足一半）。送达不足期望一半
+        // 时重跑同一 payload/schedule，避免把「没送到」当成「没触发」。
+        let expected_msgs = expected_publishes(rate_hz, duration_sec, burst, max_publishes);
         let mut trace = None;
+        let mut last_delivered = 0u64;
         for attempt in 0..BRIDGE_ATTEMPTS {
             let bridge_status = clean_env(Command::new("bash"))
                 .args(["-c", &bridge_command])
@@ -701,10 +719,16 @@ fn main() {
                     break;
                 }
             };
-            let delivered = !drained.call_trace.is_empty() || !drained.msg_trace.is_empty();
-            if !delivered && stack_alive(&mut stack) && attempt + 1 < BRIDGE_ATTEMPTS {
+            let delivered = drained.msg_trace.len() as u64;
+            last_delivered = delivered;
+            if expected_msgs > 0
+                && delivered * 2 < expected_msgs
+                && stack_alive(&mut stack)
+                && attempt + 1 < BRIDGE_ATTEMPTS
+            {
                 eprintln!(
-                    "round {round}: no callbacks or messages observed (attempt {}), respawning bridge",
+                    "round {round}: {delivered}/{} messages delivered (attempt {}), respawning bridge",
+                    expected_msgs,
                     attempt + 1
                 );
                 continue;
@@ -715,6 +739,12 @@ fn main() {
         let Some(trace) = trace else {
             continue;
         };
+        if expected_msgs > 0 && last_delivered * 2 < expected_msgs && !trace.msg_trace.is_empty() {
+            eprintln!(
+                "round {round}: only {last_delivered}/{} messages delivered after {} attempts",
+                expected_msgs, BRIDGE_ATTEMPTS
+            );
+        }
 
         let crashed = !stack_alive(&mut stack);
         let empty = trace.call_trace.is_empty() && trace.msg_trace.is_empty();
@@ -865,7 +895,7 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{branch_totals_from_summary, cumulative_branches};
+    use super::{branch_totals_from_summary, cumulative_branches, expected_publishes};
 
     #[test]
     fn branch_totals_parses_typical_summary() {
@@ -891,5 +921,17 @@ Summary coverage rate:
         assert_eq!(cumulative_branches(100, 90), (100, false));
         assert_eq!(cumulative_branches(80, 90), (90, true));
         assert_eq!(cumulative_branches(90, 90), (90, false));
+    }
+
+    #[test]
+    fn expected_publishes_matches_bridge_logic() {
+        // 20 Hz × 20 s × burst 2 = 800，受 max_publishes=120 封顶。
+        assert_eq!(expected_publishes(20.0, 20.0, 2, 120), 120);
+        // 55.6 Hz × 13 s ≈ 722 tick × burst 2，受封顶。
+        assert_eq!(expected_publishes(1000.0 / 18.0, 13.0, 2, 120), 120);
+        // max_publishes=0 不封顶：20 Hz × 2 s × burst 1 = 40。
+        assert_eq!(expected_publishes(20.0, 2.0, 1, 0), 40);
+        // 封顶小于 tick 数时不溢出（burst 上限先取 min）。
+        assert_eq!(expected_publishes(20.0, 2.0, 2, 40), 40);
     }
 }
