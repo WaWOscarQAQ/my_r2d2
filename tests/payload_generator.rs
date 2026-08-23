@@ -4,7 +4,7 @@
 use my_r2d2::interface_extractor::{DataFile, Field, Interface, Kind, Primitive, TypeNode};
 use my_r2d2::payload::{Error, Payload, Serializer, SimpleSerializer, Value, ValueTree};
 use my_r2d2::payload_generator::{GeneratorConfig, PayloadGenerator, Sender, StateOracle};
-use my_r2d2::payload_pool::PayloadPool;
+use my_r2d2::payload_pool::{PayloadPool, SelectionPolicy};
 use rand::{SeedableRng, rngs::StdRng};
 
 /// Records every payload handed to the transport.
@@ -135,9 +135,7 @@ fn only_new_state_or_crash_payloads_enter_pool() {
     };
     let payload = generator.next_payload().unwrap();
     sender.send(&payload).unwrap();
-    if oracle.is_new_state() || oracle.crashed() {
-        generator.pool_mut().push(payload);
-    }
+    generator.retain_if_interesting(payload, &oracle);
     assert!(generator.pool().is_empty());
 
     let oracle = MockOracle {
@@ -146,9 +144,7 @@ fn only_new_state_or_crash_payloads_enter_pool() {
     };
     let payload = generator.next_payload().unwrap();
     sender.send(&payload).unwrap();
-    if oracle.is_new_state() || oracle.crashed() {
-        generator.pool_mut().push(payload);
-    }
+    generator.retain_if_interesting(payload, &oracle);
     assert_eq!(generator.pool().len(), 1);
 
     let oracle = MockOracle {
@@ -157,9 +153,7 @@ fn only_new_state_or_crash_payloads_enter_pool() {
     };
     let payload = generator.next_payload().unwrap();
     sender.send(&payload).unwrap();
-    if oracle.is_new_state() || oracle.crashed() {
-        generator.pool_mut().push(payload);
-    }
+    generator.retain_if_interesting(payload, &oracle);
     assert_eq!(generator.pool().len(), 2);
     assert_eq!(sender.sent.borrow().len(), 3);
 }
@@ -253,7 +247,9 @@ fn pool_pick_returns_a_stored_payload_without_removing_it() {
     assert_eq!(pool.len(), 2);
 
     let mut rng = StdRng::seed_from_u64(3);
-    let picked = pool.pick_for_mutation(&mut rng).unwrap();
+    let picked = pool
+        .pick_for_mutation(&mut rng, SelectionPolicy::Uniform)
+        .unwrap();
     assert!(picked.interface_id == "/a" || picked.interface_id == "/b");
     assert_eq!(pool.len(), 2);
 }

@@ -95,6 +95,17 @@ fn round_trips_string_and_bytes_with_length_prefix() {
     );
 }
 
+#[test]
+fn round_trips_bounded_string_and_array_values() {
+    let string_ty = TypeNode::bounded_string(3);
+    let string_value = leaf(Value::String("abc".to_string()));
+    assert_eq!(round_trip(&string_value, &string_ty), string_value);
+
+    let array_ty = TypeNode::bounded_array(Primitive::U8.into(), 2);
+    let array_value = ValueTree::Array(vec![leaf(Value::U8(1)), leaf(Value::U8(2))]);
+    assert_eq!(round_trip(&array_value, &array_ty), array_value);
+}
+
 fn value_len(value: &ValueTree) -> u32 {
     match value {
         ValueTree::Leaf(Value::String(s)) => s.len() as u32,
@@ -198,6 +209,29 @@ fn encoding_array_value_against_nested_type_reports_type_mismatch() {
     assert!(matches!(err, Error::TypeMismatch { .. }));
 }
 
+#[test]
+fn encoding_overlong_bounded_values_reports_type_mismatch() {
+    let string_ty = TypeNode::bounded_string(3);
+    let string_value = leaf(Value::String("toolong".to_string()));
+    let err = SimpleSerializer
+        .serialize(&string_value, &string_ty)
+        .unwrap_err();
+    assert!(matches!(err, Error::TypeMismatch { .. }));
+    assert!(err.to_string().contains("at most 3 bytes"), "got: {err}");
+
+    let array_ty = TypeNode::bounded_array(Primitive::U8.into(), 2);
+    let array_value = ValueTree::Array(vec![
+        leaf(Value::U8(1)),
+        leaf(Value::U8(2)),
+        leaf(Value::U8(3)),
+    ]);
+    let err = SimpleSerializer
+        .serialize(&array_value, &array_ty)
+        .unwrap_err();
+    assert!(matches!(err, Error::TypeMismatch { .. }));
+    assert!(err.to_string().contains("at most 2 elements"), "got: {err}");
+}
+
 // ---------------------------------------------------------------------------
 // 解码期格式错误
 // ---------------------------------------------------------------------------
@@ -254,6 +288,25 @@ fn decoding_fixed_array_with_wrong_count_reports_malformed() {
         err.to_string().contains("expected 4, found 3"),
         "got: {err}"
     );
+}
+
+#[test]
+fn decoding_overlong_bounded_values_reports_type_mismatch() {
+    let string_ty = TypeNode::bounded_string(3);
+    let string_bytes = [4u8, 0, 0, 0, b'a', b'b', b'c', b'd'];
+    let err = SimpleSerializer
+        .deserialize(&string_bytes, &string_ty)
+        .unwrap_err();
+    assert!(matches!(err, Error::TypeMismatch { .. }));
+    assert!(err.to_string().contains("at most 3 bytes"), "got: {err}");
+
+    let array_ty = TypeNode::bounded_array(Primitive::U8.into(), 2);
+    let array_bytes = [3u8, 0, 0, 0, 1, 2, 3];
+    let err = SimpleSerializer
+        .deserialize(&array_bytes, &array_ty)
+        .unwrap_err();
+    assert!(matches!(err, Error::TypeMismatch { .. }));
+    assert!(err.to_string().contains("at most 2 elements"), "got: {err}");
 }
 
 #[test]

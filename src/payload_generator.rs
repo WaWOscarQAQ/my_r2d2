@@ -8,14 +8,14 @@
 //! interface data files.
 //!
 //! Reproduction choices (paper gaps):
-//! Interface and pool-item selection probabilities are not disclosed by
-//! the paper; this reproduction selects uniformly, and the two config
-//! fields only record the gap.
+//! Interface and pool-item selection distributions are not disclosed by
+//! the paper; this reproduction makes the active selection policy
+//! explicit and defaults both to uniform.
 
 use crate::interface_extractor::{Interface, Primitive, TypeNode};
 use crate::mutation::{Mutator, OperatorWeights, OperatorsPerType, generate_value};
 use crate::payload::{Error, Payload, Serializer, SimpleSerializer};
-use crate::payload_pool::PayloadPool;
+use crate::payload_pool::{PayloadPool, SelectionPolicy};
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use std::collections::BTreeMap;
 
@@ -98,10 +98,9 @@ impl Default for ValueRanges {
 
 /// All parameterized generation and mutation knobs.
 ///
-/// The interface and pool-item selection probabilities are not disclosed
-/// by the paper. This reproduction selects uniformly; the two probability
-/// fields only record the gap and are not read by the current
-/// implementation.
+/// The interface and pool-item selection distributions are not disclosed
+/// by the paper. This reproduction therefore exposes explicit selection
+/// policies instead of pretending to implement a paper probability model.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneratorConfig {
     /// Number of operator hits applied per mutation call.
@@ -110,10 +109,8 @@ pub struct GeneratorConfig {
     pub max_recursion_depth: u32,
     /// Length distribution of variable-length arrays.
     pub array_len_range: std::ops::RangeInclusive<usize>,
-    /// Gap record, see the struct docs.
-    pub interface_select_probability: f64,
-    /// Gap record, see the struct docs.
-    pub pool_item_select_probability: f64,
+    pub interface_selection: SelectionPolicy,
+    pub pool_selection: SelectionPolicy,
     pub per_type_value_ranges: ValueRanges,
     pub operator_weights: OperatorWeights,
     pub operators_per_type: OperatorsPerType,
@@ -125,8 +122,8 @@ impl Default for GeneratorConfig {
             mutation_energy: 8,
             max_recursion_depth: 8,
             array_len_range: 0..=8,
-            interface_select_probability: 1.0,
-            pool_item_select_probability: 1.0,
+            interface_selection: SelectionPolicy::Uniform,
+            pool_selection: SelectionPolicy::Uniform,
             per_type_value_ranges: ValueRanges::default(),
             operator_weights: OperatorWeights::default(),
             operators_per_type: OperatorsPerType::default(),
@@ -134,8 +131,7 @@ impl Default for GeneratorConfig {
     }
 }
 
-/// Sends a payload to the system under test. The real ROS 2 transport
-/// (`rclcpp` publisher / service client) is wired in a later phase.
+/// Sends a payload to the system under test.
 pub trait Sender {
     fn send(&self, payload: &Payload) -> Result<(), Error>;
 }
@@ -178,6 +174,16 @@ impl PayloadGenerator {
         &mut self.pool
     }
 
+    /// Preserves only payloads judged interesting by the state oracle.
+    pub fn retain_if_interesting(&mut self, payload: Payload, oracle: &impl StateOracle) -> bool {
+        if oracle.is_new_state() || oracle.crashed() {
+            self.pool.push(payload);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Produces the next payload and advances the round counter.
     ///
     /// Each round reseeds the RNG from a seed derived from `base_seed`
@@ -194,15 +200,18 @@ impl PayloadGenerator {
                     "no interfaces extracted; run a dry run first".to_string(),
                 ));
             }
-            let index = self.rng.gen_range(0..self.interfaces.len());
+            let index = self.select_interface_index()?;
             let interface = &self.interfaces[index];
             let ty = top_level_type(interface);
             let value = generate_value(&ty, &mut self.rng, &self.config);
             Payload::new(interface.name.clone(), interface.kind, value, round_seed)
         } else {
-            let picked = self.pool.pick_for_mutation(&mut self.rng).ok_or_else(|| {
-                Error::Unsupported("payload pool became empty mid-round".to_string())
-            })?;
+            let picked = self
+                .pool
+                .pick_for_mutation(&mut self.rng, self.config.pool_selection)
+                .ok_or_else(|| {
+                    Error::Unsupported("payload pool became empty mid-round".to_string())
+                })?;
             let interface = self.interface(&picked.interface_id).ok_or_else(|| {
                 Error::Unsupported(format!(
                     "pool payload references unknown interface {:?}",
@@ -227,6 +236,12 @@ impl PayloadGenerator {
         self.interfaces
             .iter()
             .find(|interface| interface.name == id)
+    }
+
+    fn select_interface_index(&mut self) -> Result<usize, Error> {
+        match self.config.interface_selection {
+            SelectionPolicy::Uniform => Ok(self.rng.gen_range(0..self.interfaces.len())),
+        }
     }
 }
 

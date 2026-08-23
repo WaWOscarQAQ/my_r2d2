@@ -5,6 +5,9 @@ pub mod mutation;
 pub mod payload;
 pub mod payload_generator;
 pub mod payload_pool;
+#[cfg(unix)]
+pub mod runtime;
 pub mod seed_corpus;
 #[cfg(unix)]
 pub mod trace_buffer;
+pub mod utils;

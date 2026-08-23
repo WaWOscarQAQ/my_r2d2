@@ -20,11 +20,24 @@ import argparse
 import csv
 import hashlib
 import os
+import subprocess
 import sys
 
 import yaml
 
-DEFAULT_SOURCE = os.environ.get("R2D2_FUZZ_SOURCE", "/home/ocsar/ROS/nav2-_fuzz")
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def yaml_env(key):
+    helper = os.path.join(REPO_ROOT, "target", "debug", "my_r2d2")
+    if os.path.exists(helper) and os.access(helper, os.X_OK):
+        command = [helper, "yaml-get", key]
+    else:
+        command = ["cargo", "run", "--quiet", "--manifest-path", os.path.join(REPO_ROOT, "Cargo.toml"), "--", "yaml-get", key]
+    return subprocess.check_output(command, text=True).strip()
+
+
+DEFAULT_SOURCE = yaml_env("R2D2_FUZZ_SOURCE")
 
 SCAN_DEFAULTS = {
     "angle_min": -3.14159,

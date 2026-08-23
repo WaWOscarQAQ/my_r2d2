@@ -18,6 +18,7 @@
 #include <iostream>
 #include <string>
 #include <sys/mman.h>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -37,12 +38,13 @@ void write_sequence() {
   tracer::rclcpp_callback_init(reinterpret_cast<const void*>(kSubscriptionRclcppHandler),
                                reinterpret_cast<const void*>(kSubscriptionRclHandler),
                                tracer::CallbackType::Subscription);
-  tracer::rcl_callback_init("/cmd_vel_callback",
+  tracer::rcl_callback_init("/cmd_vel_callback", "/robot",
                             reinterpret_cast<const void*>(kSubscriptionRclHandler));
   tracer::rclcpp_callback_init(reinterpret_cast<const void*>(kTimerRclcppHandler),
                                reinterpret_cast<const void*>(kTimerRclHandler),
                                tracer::CallbackType::Timer);
-  tracer::rcl_callback_init("timer_callback", reinterpret_cast<const void*>(kTimerRclHandler));
+  tracer::rcl_callback_init("timer_callback", "/robot",
+                            reinterpret_cast<const void*>(kTimerRclHandler));
 
   tracer::executor_execute(reinterpret_cast<const void*>(kSubscriptionRclcppHandler), 100);
   tracer::callback_start(reinterpret_cast<const void*>(kSubscriptionRclcppHandler), 200);
@@ -52,6 +54,8 @@ void write_sequence() {
   tracer::callback_start(reinterpret_cast<const void*>(kTimerRclcppHandler), 500);
   tracer::callback_end(reinterpret_cast<const void*>(kTimerRclcppHandler), 600);
   tracer::rcl_take(reinterpret_cast<const void*>(kTimerRclHandler), 1024, 350, 390);
+  // Delimits the single payload round this sequence represents.
+  tracer::round_boundary(1, 700);
 }
 
 // Overwrites each ring beyond its capacity: registration_capacity + 2
@@ -64,7 +68,7 @@ void write_overflow_sequence(std::uint64_t registration_capacity,
     tracer::rclcpp_callback_init(reinterpret_cast<const void*>(handler),
                                  reinterpret_cast<const void*>(handler + 0x100),
                                  tracer::CallbackType::Subscription);
-    tracer::rcl_callback_init("overflow_callback",
+    tracer::rcl_callback_init("overflow_callback", "/overflow",
                               reinterpret_cast<const void*>(handler + 0x100));
   }
   for (std::uint64_t i = 0; i < runtime_capacity + 2; ++i) {
@@ -83,12 +87,13 @@ void write_live_sequence(std::uint64_t sched_sub, std::uint64_t exec_sub,
   tracer::rclcpp_callback_init(reinterpret_cast<const void*>(kSubscriptionRclcppHandler),
                                reinterpret_cast<const void*>(kSubscriptionRclHandler),
                                tracer::CallbackType::Subscription);
-  tracer::rcl_callback_init("/cmd_vel_callback",
+  tracer::rcl_callback_init("/cmd_vel_callback", "/robot",
                             reinterpret_cast<const void*>(kSubscriptionRclHandler));
   tracer::rclcpp_callback_init(reinterpret_cast<const void*>(kTimerRclcppHandler),
                                reinterpret_cast<const void*>(kTimerRclHandler),
                                tracer::CallbackType::Timer);
-  tracer::rcl_callback_init("timer_callback", reinterpret_cast<const void*>(kTimerRclHandler));
+  tracer::rcl_callback_init("timer_callback", "/robot",
+                            reinterpret_cast<const void*>(kTimerRclHandler));
 
   constexpr std::uint64_t kInvokeSub = 100;
   constexpr std::uint64_t kInvokeTimer = 400;
@@ -107,6 +112,37 @@ void write_live_sequence(std::uint64_t sched_sub, std::uint64_t exec_sub,
                            kInvokeTimer + sched_timer);
     tracer::callback_end(reinterpret_cast<const void*>(kTimerRclcppHandler),
                          kInvokeTimer + sched_timer + exec_timer);
+  }
+}
+
+// High-rate writer for the concurrent reader stress test: each thread
+// registers one subscription callback with a thread-derived handler set,
+// then writes `rounds` execute/start/end/take cycles as fast as possible.
+// Small ring capacities force continuous overflow so the Rust reader can
+// prove it observes losses but never torn records.
+void write_stress(std::uint64_t rounds, std::uint64_t threads) {
+  auto worker = [rounds](std::uint64_t thread_index) {
+    const std::uint64_t base = 0x10000 + thread_index * 0x1000;
+    const auto* rclcpp_handler = reinterpret_cast<const void*>(base);
+    const auto* rcl_handler = reinterpret_cast<const void*>(base + 0x100);
+    tracer::rclcpp_callback_init(rclcpp_handler, rcl_handler,
+                                 tracer::CallbackType::Subscription);
+    tracer::rcl_callback_init("stress_callback", "/stress", rcl_handler);
+    for (std::uint64_t i = 0; i < rounds; ++i) {
+      tracer::executor_execute(rclcpp_handler, tracer::now_ns());
+      tracer::callback_start(rclcpp_handler, tracer::now_ns());
+      tracer::callback_end(rclcpp_handler, tracer::now_ns());
+      tracer::rcl_take(rcl_handler, 512, tracer::now_ns(), tracer::now_ns());
+    }
+  };
+
+  std::vector<std::thread> pool;
+  for (std::uint64_t t = 1; t < threads; ++t) {
+    pool.emplace_back(worker, t);
+  }
+  worker(0);
+  for (auto& thread : pool) {
+    thread.join();
   }
 }
 
@@ -138,12 +174,16 @@ int main(int argc, char** argv) {
   std::string shm_name;
   std::string fixture_path;
   std::uint64_t registration_capacity = 8;
-  std::uint64_t runtime_capacity = 8;
+  std::uint64_t runtime_capacity = 16;
   bool overflow = false;
   bool cleanup = false;
   bool live = false;
   bool skip_timer = false;
   bool crash = false;
+  bool stress = false;
+  std::uint64_t stress_rounds = 1000;
+  std::uint64_t threads = 1;
+  std::int64_t mark_round = -1;
   std::uint64_t sched_sub = 10;
   std::uint64_t exec_sub = 100;
   std::uint64_t sched_timer = 10;
@@ -189,6 +229,14 @@ int main(int argc, char** argv) {
       sub_timestamp = std::stoull(next_value("--sub"));
     } else if (arg == "--no-timer") {
       skip_timer = true;
+    } else if (arg == "--stress") {
+      stress = true;
+    } else if (arg == "--stress-rounds") {
+      stress_rounds = std::stoull(next_value("--stress-rounds"));
+    } else if (arg == "--threads") {
+      threads = std::stoull(next_value("--threads"));
+    } else if (arg == "--mark-round") {
+      mark_round = std::stoll(next_value("--mark-round"));
     } else if (arg == "--crash") {
       crash = true;
     } else if (arg.rfind("--", 0) == 0) {
@@ -205,23 +253,31 @@ int main(int argc, char** argv) {
   if (shm_name.empty()) {
     std::cerr << "usage: mock_writer <shm_name> [--fixture <path>]"
               << " [--reg-capacity N] [--runtime-capacity N]"
-              << " [--overflow] [--cleanup]" << std::endl
+              << " [--overflow] [--cleanup] [--mark-round N]" << std::endl
               << "       mock_writer <shm_name> --live [--sched-sub N]"
               << " [--exec-sub N] [--sched-timer N] [--exec-timer N]"
               << " [--size N] [--pub N] [--sub N] [--no-timer] [--crash]"
+              << " [--mark-round N]" << std::endl
+              << "       mock_writer <shm_name> --stress [--stress-rounds N]"
+              << " [--threads N] [--reg-capacity N] [--runtime-capacity N]"
               << std::endl;
     return 2;
   }
 
   try {
     tracer::init(shm_name.c_str(), registration_capacity, runtime_capacity);
-    if (live) {
+    if (stress) {
+      write_stress(stress_rounds, threads);
+    } else if (live) {
       write_live_sequence(sched_sub, exec_sub, sched_timer, exec_timer, buffer_size,
                           pub_timestamp, sub_timestamp, skip_timer);
     } else if (overflow) {
       write_overflow_sequence(registration_capacity, runtime_capacity);
     } else {
       write_sequence();
+    }
+    if (mark_round >= 0) {
+      tracer::round_boundary(static_cast<std::uint32_t>(mark_round), tracer::now_ns());
     }
     if (!fixture_path.empty()) {
       dump_fixture(fixture_path, registration_capacity, runtime_capacity);

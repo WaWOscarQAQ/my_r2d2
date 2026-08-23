@@ -56,6 +56,14 @@ class RingBuffer {
     header_->capacity = capacity;
   }
 
+  // Views an already-initialized ring in shared memory without touching
+  // the header. Used by processes that attach to an existing object.
+  void attach(void* ring_start) {
+    header_ = static_cast<RingHeader*>(ring_start);
+    records_ = reinterpret_cast<Record*>(
+        reinterpret_cast<std::uint8_t*>(ring_start) + sizeof(RingHeader));
+  }
+
   // Writes one record and publishes its index. Overwriting the oldest
   // record increments overflow_count so readers can detect data loss.
   void push(const Record& record) {

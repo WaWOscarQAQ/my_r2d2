@@ -192,3 +192,23 @@ exception thrown inside tracer: callback name exceeds record capacity
 - C3 payload 边界：论文要求每个 payload 后分析当前 trace，但没有披露边界事件格式；留待阶段 F 的发送器与 Feedback Controller 同步设计。
 - C4 throughput 单位：继续标为 bytes/ns reproduction choice，所有无效 duration 已显式计数。
 - C7 并发读取：本轮未改变 reader 的无锁实现；它仍是下一项高优先级验证工作，因为论文 §4.3 明确强调 mutex 提供线程与内存安全。真实实时接入前应改为读写双方共享同一进程间 mutex，或用等价且经证明的快照协议。
+
+## 8. 第二轮回填（2026-08-22，ABI v2）
+
+### 8.1 本轮关闭的缺口
+
+- **C1 namespace 已补齐**：论文 §4.1.1 明确把 namespace 列为注册属性。`RegistrationRecord` 追加 `callback_namespace_len`@160 与 `callback_namespace[64]`@164（sizeof 160→232，shm version 1→2），由 `rcl_callback_init(name, namespace, handler)` 携带；nav2 hooks 在各调用点传 `node->get_namespace()`。Figure 5 明确 ID 只哈希 (name, type)，namespace 不进 ID；registry 新增 `callback_id_collisions` 诊断：同 (name, type) 跨 namespace 时计数并使 trace 失去反馈资格。namespace 截断与 name 截断同政策（`truncated_callback_namespaces`，不计完整注册）。
+- **C3 payload 轮次边界已定义**：`RuntimeEventType::RoundBoundary=4`，record 56 字节布局不变（原 offset 4 padding 命名 `aux` 存 round id）。新增 `tracer::attach()` 与 `round_marker` CLI，harness（`nav2_costmap_e2e`）每轮 settle 300ms 后写 marker 并按 marker 分段，straggler 事件带入下一轮；marker 缺失时回退游标语义。`end_to_end` mock 轮经 `--mark-round` 演练同一路径。profile 层把 marker 当 framing 跳过，不计诊断。
+- **C7 并发读写已验证**：`mock_writer --stress --stress-rounds N --threads T`（小容量 ring 强制持续 overflow），Rust 测试 `concurrent_reader_never_sees_torn_records` 在 writer 双线程全速写入时并发 drain：解析零 Malformed，事件数 + missed 与写入总数（2×3000×4）严格对账，handler 值域合法——无锁读"只丢不错"。
+
+### 8.2 C2 publish timestamp（合同化，不改 ABI）
+
+不新增论文未描述的 pub 侧 tracer。应用层维持现状并在 `docs/plan/r2d2_reproduction_contract.md` 冻结：pub = 消息 `header.stamp`（缺失置 0、非正 duration 跳过），时钟域 ROS system time；未来 rcl 层候选 `rmw_message_info_t.source_timestamp` 登记为未验证 gap。
+
+### 8.3 验证结果（本轮）
+
+- `cargo test`：104 通过、0 失败（trace_buffer 6 含并发压力测试；callback_profile 18 含 namespace 截断/碰撞/marker 跳过测试）。
+- `cargo clippy --all-targets`：仅剩 6 个既有风格警告（tests/mutation.rs、tests/interface_file_extractor.rs），本轮新增代码零警告。
+- `cmake --build tracer/build` + `ctest`：通过，safety test 覆盖 round_boundary 未 init no-op 与 namespace 截断标志。
+- fixture 重生成（golden 容量调整为 reg 8 / runtime 16 以容纳新增 marker 事件），再生对比 byte-identical；SHA-256：golden `2a3d2b3dd44c458cbaa23a304345543ea68db1c1ae6dfdedbd21e90a9b9d8905`，overflow `c377bc79483eb1dfdae68efd2d087bd3ed20d086b6091942d78b99b5198857b5`。
+- `nav2_ws/src/r2d2_tracer` 已同步 ABI v2（headers/mock_writer/round_marker/safety test 与 standalone 一致；tracers.cpp 保留 nav2 侧覆盖率钩子差异）。

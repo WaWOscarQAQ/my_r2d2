@@ -17,16 +17,20 @@ use std::io;
 use std::path::Path;
 
 const MAGIC: u32 = 0x5252_3244;
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 const SHARED_HEADER_SIZE: u64 = 48;
 const RING_HEADER_SIZE: u64 = 64;
 const RING_MUTEX_SLOT: u64 = 40;
 const RING_DATA_SIZE: u64 = 24;
-const REGISTRATION_RECORD_SIZE: u64 = 160;
+const REGISTRATION_RECORD_SIZE: u64 = 232;
 const RUNTIME_RECORD_SIZE: u64 = 56;
 const CALLBACK_NAME_CAPACITY: usize = 128;
+const CALLBACK_NAMESPACE_CAPACITY: usize = 64;
 const REGISTRATION_FLAG_NAME_TRUNCATED: u32 = 1;
+const REGISTRATION_FLAG_NAMESPACE_TRUNCATED: u32 = 2;
+const KNOWN_REGISTRATION_FLAGS: u32 =
+    REGISTRATION_FLAG_NAME_TRUNCATED | REGISTRATION_FLAG_NAMESPACE_TRUNCATED;
 
 /// Which tracer produced a registration record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,7 +40,7 @@ pub enum RegistrationSource {
 }
 
 /// The callback types recorded by the RCLCPP registration tracer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CallbackType {
     Subscription,
     Timer,
@@ -50,6 +54,11 @@ pub enum RuntimeEventType {
     CallbackStart,
     CallbackEnd,
     RclTake,
+    /// Harness-written marker delimiting one payload execution round. The
+    /// paper analyzes the current callback trace after each payload but
+    /// does not disclose a boundary event format; the marker is a
+    /// reproduction choice.
+    RoundBoundary,
 }
 
 /// One entry of the callback registration buffer.
@@ -66,6 +75,11 @@ pub struct RegistrationEvent {
     /// The tracer could not store the complete callback name. A truncated
     /// name must never be used to derive the paper-defined callback ID.
     pub callback_name_truncated: bool,
+    /// The callback namespace, which the paper (§4.1.1) lists as a
+    /// registration attribute. Only the RCL registration tracer records it.
+    pub callback_namespace: String,
+    /// The tracer could not store the complete callback namespace.
+    pub callback_namespace_truncated: bool,
 }
 
 /// One entry of the runtime execution buffer.
@@ -78,6 +92,9 @@ pub struct RuntimeEvent {
     pub buffer_size: u64,
     pub pub_timestamp: u64,
     pub sub_timestamp: u64,
+    /// The payload round id; only meaningful for `RoundBoundary` events and
+    /// zero for the paper-defined event kinds.
+    pub round_id: u32,
 }
 
 /// Events drained in one read plus the number of records that were
@@ -288,7 +305,7 @@ fn parse_registration(bytes: &[u8]) -> Result<RegistrationEvent, TraceError> {
     };
     let name_len = read_u32(bytes, 24) as usize;
     let flags = read_u32(bytes, 28);
-    if flags & !REGISTRATION_FLAG_NAME_TRUNCATED != 0 {
+    if flags & !KNOWN_REGISTRATION_FLAGS != 0 {
         return Err(TraceError::Malformed(format!(
             "unsupported registration flags 0x{flags:08x}"
         )));
@@ -298,8 +315,17 @@ fn parse_registration(bytes: &[u8]) -> Result<RegistrationEvent, TraceError> {
             "callback name length {name_len} exceeds capacity"
         )));
     }
+    let namespace_len = read_u32(bytes, 160) as usize;
+    if namespace_len > CALLBACK_NAMESPACE_CAPACITY {
+        return Err(TraceError::Malformed(format!(
+            "callback namespace length {namespace_len} exceeds capacity"
+        )));
+    }
     let callback_name = std::str::from_utf8(&bytes[32..32 + name_len])
         .map_err(|_| TraceError::Malformed("callback name is not valid UTF-8".to_string()))?
+        .to_string();
+    let callback_namespace = std::str::from_utf8(&bytes[164..164 + namespace_len])
+        .map_err(|_| TraceError::Malformed("callback namespace is not valid UTF-8".to_string()))?
         .to_string();
     Ok(RegistrationEvent {
         source,
@@ -308,6 +334,8 @@ fn parse_registration(bytes: &[u8]) -> Result<RegistrationEvent, TraceError> {
         rcl_handler: read_u64(bytes, 16),
         callback_name,
         callback_name_truncated: flags & REGISTRATION_FLAG_NAME_TRUNCATED != 0,
+        callback_namespace,
+        callback_namespace_truncated: flags & REGISTRATION_FLAG_NAMESPACE_TRUNCATED != 0,
     })
 }
 
@@ -317,6 +345,7 @@ fn parse_runtime(bytes: &[u8]) -> Result<RuntimeEvent, TraceError> {
         1 => RuntimeEventType::CallbackStart,
         2 => RuntimeEventType::CallbackEnd,
         3 => RuntimeEventType::RclTake,
+        4 => RuntimeEventType::RoundBoundary,
         other => {
             return Err(TraceError::Malformed(format!(
                 "bad runtime event type {other}"
@@ -331,5 +360,6 @@ fn parse_runtime(bytes: &[u8]) -> Result<RuntimeEvent, TraceError> {
         buffer_size: read_u64(bytes, 32),
         pub_timestamp: read_u64(bytes, 40),
         sub_timestamp: read_u64(bytes, 48),
+        round_id: read_u32(bytes, 4),
     })
 }

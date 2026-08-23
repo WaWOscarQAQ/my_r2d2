@@ -5,7 +5,7 @@
 //! 2. 用 nav2 fuzzer 的真实目标（LaserScan / Twist 类型树）做类型合规性
 //!    集成测试——变异后的值树必须仍能对类型树序列化成功。
 
-use my_r2d2::interface_extractor::{Extractor, Field, FileExtractor, Primitive, TypeNode};
+use my_r2d2::interface_extractor::{Extractor, Field, FileExtractor, Literal, Primitive, TypeNode};
 use my_r2d2::mutation::{Mutator, OpKind, OperatorsPerType, generate_value};
 use my_r2d2::payload::{Serializer, SimpleSerializer, Value, ValueTree};
 use my_r2d2::payload_generator::{GeneratorConfig, ValueRange, ValueRanges};
@@ -129,6 +129,117 @@ fn generate_value_respects_custom_ranges_and_array_bounds() {
     assert!(
         matches!(generate_value(&ty, &mut rng, &config), ValueTree::Nested(items) if items.len() == 2)
     );
+}
+
+#[test]
+fn generate_value_uses_field_defaults_before_sampling() {
+    let ty = TypeNode::nested(vec![
+        Field::new("x", Primitive::I32).with_default(Literal::I32(5)),
+        Field::new("label", TypeNode::bounded_string(4))
+            .with_default(Literal::String("ab".to_string())),
+    ]);
+
+    let value = generate_value(&ty, &mut seeded_rng(99), &GeneratorConfig::default());
+    assert_eq!(
+        value,
+        ValueTree::Nested(vec![
+            leaf(Value::I32(5)),
+            leaf(Value::String("ab".to_string()))
+        ])
+    );
+}
+
+#[test]
+fn generate_value_uses_nested_defaults_before_sampling() {
+    let ty = TypeNode::nested(vec![
+        Field::new(
+            "stamp",
+            TypeNode::nested(vec![
+                Field::new("sec", Primitive::I32).with_default(Literal::I32(1)),
+                Field::new("nanosec", Primitive::U32).with_default(Literal::U32(2)),
+            ]),
+        )
+        .with_default(Literal::Nested(vec![Literal::I32(3), Literal::U32(4)])),
+        Field::new(
+            "history",
+            TypeNode::array(TypeNode::nested(vec![
+                Field::new("sec", Primitive::I32),
+                Field::new("nanosec", Primitive::U32),
+            ])),
+        )
+        .with_default(Literal::Array(vec![
+            Literal::Nested(vec![Literal::I32(5), Literal::U32(6)]),
+            Literal::Nested(vec![Literal::I32(7), Literal::U32(8)]),
+        ])),
+    ]);
+
+    let value = generate_value(&ty, &mut seeded_rng(101), &GeneratorConfig::default());
+    assert_eq!(
+        value,
+        ValueTree::Nested(vec![
+            ValueTree::Nested(vec![leaf(Value::I32(3)), leaf(Value::U32(4))]),
+            ValueTree::Array(vec![
+                ValueTree::Nested(vec![leaf(Value::I32(5)), leaf(Value::U32(6))]),
+                ValueTree::Nested(vec![leaf(Value::I32(7)), leaf(Value::U32(8))]),
+            ]),
+        ])
+    );
+}
+
+#[test]
+fn official_jazzy_quaternion_defaults_flow_into_generation() {
+    let share = Path::new("/opt/ros/jazzy/share");
+    let pose = share.join("geometry_msgs/msg/Pose.msg");
+    if !pose.exists() {
+        return;
+    }
+
+    let interface = FileExtractor::new(vec![pose], vec![share.to_path_buf()])
+        .extract()
+        .unwrap()
+        .remove(0);
+    let value = generate_value(
+        &TypeNode::nested(interface.fields.clone()),
+        &mut seeded_rng(202),
+        &GeneratorConfig::default(),
+    );
+
+    let ValueTree::Nested(fields) = value else {
+        panic!("expected Pose to generate as nested value");
+    };
+    let ValueTree::Nested(orientation) = &fields[1] else {
+        panic!("expected Pose.orientation to be nested");
+    };
+    assert_eq!(
+        orientation,
+        &vec![
+            leaf(Value::F64(0.0)),
+            leaf(Value::F64(0.0)),
+            leaf(Value::F64(0.0)),
+            leaf(Value::F64(1.0)),
+        ]
+    );
+}
+
+#[test]
+fn generate_value_respects_bounded_string_and_array_limits() {
+    let mut config = GeneratorConfig::default();
+    config
+        .per_type_value_ranges
+        .insert(Primitive::String, ValueRange::new(5.0, 5.0));
+    config.array_len_range = 4..=4;
+
+    let ty = TypeNode::nested(vec![
+        Field::new("name", TypeNode::bounded_string(3)),
+        Field::new("samples", TypeNode::bounded_array(Primitive::U8.into(), 2)),
+    ]);
+    let value = generate_value(&ty, &mut seeded_rng(123), &config);
+    let ValueTree::Nested(fields) = value else {
+        panic!("expected nested value");
+    };
+
+    assert!(matches!(&fields[0], ValueTree::Leaf(Value::String(text)) if text.len() <= 3));
+    assert!(matches!(&fields[1], ValueTree::Array(items) if items.len() <= 2));
 }
 
 // ---------------------------------------------------------------------------

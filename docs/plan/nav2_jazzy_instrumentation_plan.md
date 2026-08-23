@@ -1,10 +1,16 @@
-# Nav2 Jazzy 插桩与实测记录（应用层插桩，R2D2 闭环在真实 ROS 上跑通）
+# Nav2 Jazzy 插桩与实测记录（历史应用层阶段；2026-08-23 起 live 路径已切到 runtime interposer）
 
 > 日期：2026-08-19。
 > 依据：`r2d2_strict_reproduction_plan.md` 阶段 B/D 与 `tracer_reproduction_plan.md`；
 > 用户约束：**只插桩 nav2**，不修改 rclcpp/rcl/rmw 源码，不动系统 ROS 2 环境
 > （`/opt/ros/jazzy` 只读使用，构建全部在隔离工作区进行）。
 > 状态：已完成并实测通过（见第 6 节数据）。
+>
+> 2026-08-23 更新：本文档保留的是首版 **应用层** 实施记录。当前真实 live 路径
+> 已改为 `nav2_ws/src/r2d2_tracer/src/runtime_interpose.cpp` 的 `rclcpp/rcl`
+> 运行时层拦截，并通过 `nav2_ws/launch_stack.sh` 预加载
+> `libr2d2_tracer_runtime.so`。因此第 4 节里“无 executor_execute / shm 初始化在
+> main()”等偏差只适用于本历史阶段，不再描述当前 live 配置。
 
 ## 1. 目标与结论
 
@@ -36,12 +42,12 @@ my_r2d2/nav2_ws/
 | 文件 | 位置 | 改动 |
 |---|---|---|
 | `src/costmap_2d_node.cpp` | `main()` rclcpp::init 之后 | `tracer::init("r2d2_nav2")`（应用层替代论文 RCL 层 shm 初始化） |
-| `plugins/obstacle_layer.cpp` | LaserScan 订阅注册（~:256） | `register_callback(observation_buffer.get(), topic, Subscription)` |
+| `plugins/obstacle_layer.cpp` | LaserScan 订阅注册（~:256） | `register_callback(observation_buffer.get(), topic, node->get_namespace(), Subscription)` |
 | `plugins/obstacle_layer.cpp` | PointCloud2 订阅注册（~:283） | 同上 |
 | `plugins/obstacle_layer.cpp` | `laserScanCallback` / `laserScanValidInfCallback` / `pointCloud2Callback` 入口 | `CallbackScope<Msg>(buffer.get(), msg, header.stamp)` |
 | `plugins/static_layer.cpp` | `map_sub_` / `map_update_sub_` 注册 | `register_callback(...)` |
 | `plugins/static_layer.cpp` | `incomingMap` / `incomingUpdate` 入口 | `CallbackScope`（map 用 header.stamp；update 无 header 用无消息 scope） |
-| `src/clear_costmap_service.cpp` | 4 个 clear 服务注册 + 回调入口 | `register_callback(..., Service)` + 无消息 `CallbackScope` |
+| `src/clear_costmap_service.cpp` | 4 个 clear 服务注册 + 回调入口 | `register_callback(..., node->get_namespace(), Service)` + 无消息 `CallbackScope` |
 | `src/costmap_2d_ros.cpp` | `get_cost` 服务注册 + `getCostCallback` 入口 | 同上 |
 | `package.xml` / `CMakeLists.txt` | 依赖 | 增加 `r2d2_tracer`（nav2 的 `${dependencies}` 是显式列表，必须手动加） |
 
@@ -60,6 +66,12 @@ my_r2d2/nav2_ws/
    服务回调无消息可 take，只记 start/end。
 5. **shm 初始化**：在 nav2 节点 main() 调用 `tracer::init()`，而非论文的 RCL 层。
 6. 消息吞吐单位仍为 bytes/ns（数值量级 1e-3～1e-2，打印按比例放大阅读）。
+
+2026-08-22 ABI v2 更新：namespace 不再是偏差——论文 §4.1.1 把 namespace 列为
+注册属性，`RegistrationRecord` 已追加 64 字节定长区，各 `register_callback`
+调用点传 `node->get_namespace()`；按 Figure 5 namespace 不参与 callback ID，
+同 (name, type) 跨 namespace 由 profile 层计 `callback_id_collisions` 并拦截。
+同轮新增 RoundBoundary marker 轮次分界（见 `r2d2_reproduction_contract.md` 第 4 节）。
 
 ## 5. 构建步骤与踩坑记录
 
@@ -117,7 +129,8 @@ summary: rounds=8 crashes=0 new_states=2 invalid_traces=0 pool_size=2
   真正多回调边。
 - 普通构建无 sanitizer，crash 检出依赖进程退出码；ASAN/TSAN 构建是下一步
   （用户的 `scripts/build_nav2.sh tsan` 思路可直接迁移到本工作区）。
-- Rust 读者仍是"轮末读取"而非与写入并发的实时 drain（对应 C7 缺口），
-  高频率长轮次下需要并发读取验证。
+- ~~Rust 读者仍是"轮末读取"而非与写入并发的实时 drain（对应 C7 缺口）~~
+  已于 2026-08-22 由并发压力测试关闭：`mock_writer --stress` 双线程全速写、
+  Rust 并发 drain，事件数 + missed 与写入总数严格对账，无 torn record。
 - `ros2 lifecycle`/`ros2 topic` CLI 均来自 /opt/ros 二进制，瞬态 shell 使用，
   无任何写入。

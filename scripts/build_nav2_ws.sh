@@ -9,9 +9,9 @@
 # 用法：
 #   scripts/build_nav2_ws.sh [--coverage|--tsan] [--clean] [--help]
 #
-# 环境变量（同 nav2_costmap_e2e，见 README 第 5 节）：
-#   R2D2_NAV2_WS    工作区路径（默认：本仓库的 nav2_ws/）
-#   R2D2_ROS_SETUP  ROS 2 setup 脚本（默认 /opt/ros/jazzy/setup.bash）
+# 配置来源：
+#   所需配置全部从 config/r2d2_env.yaml 读取。
+#   若某个键为空，Rust helper 会直接报 “<KEY> is empty in ...”。
 #
 # 说明：
 # - 模式切换必须 --clean（不同编译标志混用会产生无法链接的产物，文档记载
@@ -21,8 +21,22 @@
 set -euo pipefail
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-NAV2_WS="${R2D2_NAV2_WS:-$SCRIPT_DIR/../nav2_ws}"
-ROS_SETUP="${R2D2_ROS_SETUP:-/opt/ros/jazzy/setup.bash}"
+REPO_ROOT=$(cd "$SCRIPT_DIR/.." && pwd)
+yaml_env() {
+  local key="$1"
+  local helper="$REPO_ROOT/target/debug/my_r2d2"
+  if [ -x "$helper" ]; then
+    "$helper" yaml-get "$key"
+  elif command -v cargo >/dev/null 2>&1; then
+    cargo run --quiet --manifest-path "$REPO_ROOT/Cargo.toml" -- yaml-get "$key"
+  else
+    echo "build_nav2_ws: cargo is required to read YAML config" >&2
+    exit 1
+  fi
+}
+NAV2_WS="$(yaml_env R2D2_NAV2_WS)"
+ROS_SETUP="$(yaml_env R2D2_ROS_SETUP)"
+AMENT_PYTHON="$(yaml_env R2D2_PYTHON_EXECUTABLE)"
 PACKAGES="r2d2_tracer r2d2_scan_bridge nav2_msgs nav2_common nav2_util nav2_voxel_grid nav2_costmap_2d"
 MODE=plain
 CLEAN=0
@@ -47,15 +61,6 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-# ---- 前置检查 -------------------------------------------------------------
-[ -f "$ROS_SETUP" ] || die "ROS setup 不存在：$ROS_SETUP（可设置 R2D2_ROS_SETUP 覆盖）"
-[ -d "$NAV2_WS" ] || die "工作区不存在：$NAV2_WS（可设置 R2D2_NAV2_WS 覆盖）"
-[ -d "$NAV2_WS/src/r2d2_tracer" ] || die "缺少 $NAV2_WS/src/r2d2_tracer；工作区搭建步骤见 docs/plan/nav2_jazzy_instrumentation_plan.md 第 2 节"
-[ -d "$NAV2_WS/src/r2d2_scan_bridge" ] || die "缺少 $NAV2_WS/src/r2d2_scan_bridge；工作区搭建步骤见 docs/plan/nav2_jazzy_instrumentation_plan.md 第 2 节"
-[ -d "$NAV2_WS/src/navigation2/nav2_costmap_2d" ] || die "缺少 $NAV2_WS/src/navigation2/nav2_costmap_2d（插桩后的 navigation2 副本）"
-[ -f "$NAV2_WS/costmap_params.yaml" ] || die "缺少 $NAV2_WS/costmap_params.yaml"
-command -v colcon >/dev/null 2>&1 || die "colcon 不在 PATH（ubuntu 安装 python3-colcon-common-extensions）"
-
 # 上次构建模式（用于提示模式切换需 --clean）
 LAST_MODE_FILE="$NAV2_WS/build/.r2d2_last_mode"
 if [ "$CLEAN" = 0 ] && [ -f "$LAST_MODE_FILE" ]; then
@@ -76,7 +81,7 @@ fi
 
 # ---- 各模式的 CMake 参数（与文档 1a/1b 逐字一致）--------------------------
 # shellcheck disable=SC2086
-CMAKE_ARGS=(-DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo)
+CMAKE_ARGS=(-DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo "-DPython3_EXECUTABLE=$AMENT_PYTHON")
 case "$MODE" in
   plain) ;;
   coverage)
@@ -100,7 +105,7 @@ case "$MODE" in
 esac
 
 # ---- 构建 -----------------------------------------------------------------
-echo "build_nav2_ws: mode=$MODE ws=$NAV2_WS"
+echo "build_nav2_ws: mode=$MODE ws=$NAV2_WS python=$AMENT_PYTHON"
 # 用户 shell 可能残留 COLCON_CURRENT_PREFIX（zsh 场景踩坑记录），先清掉。
 unset COLCON_CURRENT_PREFIX
 # setup.bash 引用未绑定变量，set -u 下 source 会报错（与 launch_stack.sh 同款处理）。

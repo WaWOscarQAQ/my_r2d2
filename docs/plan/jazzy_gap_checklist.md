@@ -25,7 +25,7 @@
 
 优先级：P0
 
-状态：已完成（2026-08-21）。落地为 `README.md` 顶部「Quickstart：在 Jazzy 上跑通 nav2_costmap_e2e」一节：前提（/opt/ros/jazzy、colcon/ros2/setarch、Rust 1.85+、/dev/shm、可选 lcov）、nav2_ws 构建命令、`cargo test`、最小运行命令与成功输出样例、常用进阶参数表，并注明 launch_stack.sh 路径硬编码与 nav2_ws 新机器搭建（分别待 A2/A3 收口）。
+状态：已完成（2026-08-22）。落地为 `README.md` 顶部「Quickstart：在 Jazzy 上跑通 nav2_costmap_e2e」一节：写明前提、YAML 配置、nav2_ws 构建命令、`cargo test`、最小运行命令、成功输出样例和常用进阶参数。
 
 目标：
 
@@ -53,7 +53,7 @@
 
 优先级：P0
 
-状态：已完成（2026-08-21）。`examples/nav2_costmap_e2e.rs` 的 SHM 路径、ROS setup、workspace、params、ROS_DOMAIN_ID 全部改为环境变量解析（默认值等价原硬编码）；`nav2_ws/launch_stack.sh` 以 `$0` 所在目录为默认工作区并接受 `R2D2_*` 覆盖；C++ 侧 `costmap_2d_node.cpp` 的 tracer shm 名取 `R2D2_SHM_PATH` basename；`scripts/import_nav2_seeds.py` 默认源支持 `R2D2_FUZZ_SOURCE` 覆盖。README Quickstart 第 5 节收录环境变量表。已用默认方式与显式环境变量方式各实跑验证（见验证记录）。
+状态：已完成（2026-08-22）。运行配置统一放在 `config/r2d2_env.yaml`，由 `src/utils/yaml_reader.rs` 直接读取；`examples/nav2_costmap_e2e.rs`、构建脚本、启动脚本和种子导入脚本均从该文件取值。C++ costmap 节点所需的 `R2D2_SHM_PATH` 由启动脚本从 YAML 读取后传入。配置缺失或空白时只报告对应键为空，不执行额外路径或环境校验。
 
 目标：
 
@@ -66,22 +66,23 @@
 
 优先抽出的配置项：
 
-- `R2D2_WS_ROOT`
 - `R2D2_ROS_SETUP`
 - `R2D2_NAV2_WS`
+- `R2D2_PYTHON_EXECUTABLE`
 - `R2D2_SHM_PATH`
 - `ROS_DOMAIN_ID`
 - `R2D2_COSTMAP_PARAMS`
+- `R2D2_FUZZ_SOURCE`
 
 验收标准：
 
-- 仓库挪到新路径后，只靠环境变量或默认相对路径仍能启动。
+- 仓库挪到新路径后，YAML 中的相对路径仍按配置文件目录解析并能启动。
 
 ### A3. 增加一键构建脚本
 
 优先级：P0
 
-状态：已完成（2026-08-22）。落地 `scripts/build_nav2_ws.sh`：收口 plain / coverage(1a) / tsan(1b) 三种构建口径；构建前检查 ROS setup、工作区、`r2d2_tracer`/`r2d2_scan_bridge`/插桩 navigation2/params 是否就位与 colcon 是否可用；记录上次模式并在未 `--clean` 切换时拒绝；`--clean` 清理对应包产物；覆盖/TSAN 构建后提示清 `.gcda`；踩坑处理（setup.bash 的 set -u、COLCON_CURRENT_PREFIX）内建。已验证：plain 与 tsan 两种模式各全量构建并实跑 e2e 通过，模式切换守卫生效。README Quickstart 第 1 步改为脚本入口。
+状态：已完成（2026-08-22）。落地 `scripts/build_nav2_ws.sh`：从 YAML 读取工作区、ROS setup 和 Python 路径，收口 plain / coverage(1a) / tsan(1b) 三种构建口径；记录上次模式并在未 `--clean` 切换时拒绝，`--clean` 清理对应包产物。脚本不重复做依赖和路径预检，实际缺失项由对应命令直接报错。
 
 目标：
 
@@ -93,32 +94,26 @@
 
 脚本职责：
 
-- `source /opt/ros/jazzy/setup.bash`
+- 从 `config/r2d2_env.yaml` 读取工作区、ROS setup 和 Python 路径
+- `source` YAML 指定的 ROS setup
 - 调用 `colcon build --packages-select ...`
-- 提前检查 `nav2_ws/src/r2d2_tracer`、`nav2_ws/src/r2d2_scan_bridge` 是否存在
-- 构建失败时输出下一步排查点
+- 支持 plain、coverage 和 tsan 三种构建模式
 
-### A4. 增加环境预检脚本
+### A4. 增加 YAML 配置读取检查脚本
 
 优先级：P1
 
-状态：已完成（2026-08-22）。落地 `scripts/check_env.sh`：只读预检 Linux 系统、ROS setup 与 ros2（含「不在 PATH 但 setup 内可 source」的判定）、colcon/setarch/Rust 1.85+/lcov（lcov 仅 WARN）、/dev/shm 挂载与可写（写探针文件后删除）、nav2_ws 是否搭建/构建/含 params 与 launch 脚本；必需项失败退出码 1 并附排查方向。已验证：正常环境全绿退出 0，缺失工作区/ROS setup/cargo 场景均正确 FAIL。README Quickstart 新增第 0 步。
+状态：已完成（2026-08-22）。落地 `scripts/check_env.sh`：逐项读取并打印 `config/r2d2_env.yaml` 中的全部运行配置。键缺失、值为空或仅含空白时，直接报告具体键名并以非零状态退出；不执行系统、依赖、路径、版本或可写性校验。
 
 目标：
 
-- 在真正运行 example 前，把常见缺依赖或路径问题提前暴露。
+- 在真正运行 example 前，确认全部运行配置都能从 YAML 读出。
 
 建议新增文件：
 
 - `scripts/check_env.sh`
 
-建议检查项：
-
-- `/opt/ros/jazzy/setup.bash` 是否存在
-- `nav2_ws/install/setup.bash` 是否存在
-- `ros2`、`colcon`、`setarch` 是否在 PATH
-- `/dev/shm` 是否可用
-- `nav2_ws/costmap_params.yaml` 是否存在
+检查规则：逐项打印 YAML 配置；键缺失、空值或纯空白值时报出键名，不做其他校验。
 
 ### A5. 明确当前 demo 边界
 
@@ -147,6 +142,8 @@
 ### B1. 先冻结“论文复现合同”
 
 优先级：P0
+
+状态：已完成（2026-08-22）。落地 `docs/plan/r2d2_reproduction_contract.md`：固定论文身份（DOI + PDF SHA-256）、环境实测值（Ubuntu 24.04 / Jazzy 二进制 / gcc 13.3 / nav2_costmap_2d 1.3.12 vendor 副本）、paper setting / reproduction choice / unresolved gap 三栏登记、本轮 C1–C3 决策记录与 B2 环境分叉决策点。复现层级声明上限为 L1/L2（受限），不得声称 L3/L4。
 
 目标：
 
@@ -184,16 +181,18 @@
 
 优先级：P0
 
+状态：部分完成（2026-08-22）。namespace 已按论文 §4.1.1 补入注册采集（ABI v2，ID 仍只哈希 name+type，跨 namespace 碰撞显式拦截）；payload 轮次边界已定义为 RoundBoundary marker 事件并在 e2e 落地分段；并发读写已由 stress writer + 并发 drain 测试验证“只丢不错”。publish timestamp 未改 ABI：应用层来源（header.stamp）已在复现合同中冻结，rcl 层候选机制登记为未验证 gap，待 B2 定案。详见 `callback_trace_profile_issue_report.md` 第 8 节。
+
 基线文档：
 
 - `docs/plan/callback_trace_profile_issue_report.md`
 
 未闭环事项：
 
-- namespace 缺失
-- publish timestamp 来源未定
-- payload 轮次边界未定义
-- 并发读写验证未完成
+- ~~namespace 缺失~~（已补齐，ABI v2）
+- publish timestamp 来源未定（已合同化应用层口径；rcl 层真实来源待 B2）
+- ~~payload 轮次边界未定义~~（RoundBoundary marker）
+- ~~并发读写验证未完成~~（压力测试通过对账）
 
 影响：
 
@@ -202,6 +201,8 @@
 ### B4. 把 Sender / StateOracle 变成真实实现
 
 优先级：P1
+
+状态：已完成（2026-08-23）。`src/runtime/ros2_sender.rs` 提供真实 `Ros2LaserScanSender`，负责把生成出的 LaserScan payload 渲染到 bridge 文本文件并调用 `r2d2_scan_bridge` 注入 `/scan`；`src/runtime/state_oracle.rs` 现提供共享的 `BenchmarkBuilder` / `BenchmarkStateOracle`，按论文结构先独立采样 benchmark model，再在 fuzz phase 比较 trace、缓存 crash 状态并做新状态判定。`examples/nav2_costmap_e2e.rs`、`examples/end_to_end.rs` 都已切到该实现，`PayloadGenerator::retain_if_interesting()` 负责把 crash/new-state payload 收回 pool。
 
 目标：
 
@@ -217,6 +218,12 @@
 - `Sender` 负责真实 ROS topic / service 注入
 - `StateOracle` 负责 trace 判定、crash 判定、sanitizer 结果归档
 - 把 example 中的专用调度逻辑尽量下沉到库层或独立 harness 模块
+
+当前剩余边界：
+
+- 真实 sender 目前只覆盖 `/scan` 的 LaserScan 注入，尚未泛化到更多 topic/service。
+- crash/sanitizer 结果仍主要由 example/harness 汇总，未形成统一归档接口。
+- 更大范围的输入面扩展已顺延到 B5。
 
 ### B5. 扩大输入面和回调面
 

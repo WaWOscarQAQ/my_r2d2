@@ -88,13 +88,13 @@
 ### 4.3 空池生成路径
 
 - `PayloadGenerator` 在每轮开始时调用 `PayloadPool::is_empty()` 判断分支。
-- 池为空时，用当前 RNG 从提取的 `Vec<Interface>` 中随机选择一个 interface，选择概率由配置项 `interface_select_probability` 控制。
-- 按所选 interface 的 `TypeNode` 树递归生成值树：基础类型按其取值范围分布采样，数组先按配置的 `array_len_range` 采样长度再逐元素生成，嵌套消息逐字段递归。
+- 池为空时，用当前 RNG 从提取的 `Vec<Interface>` 中按 `interface_selection` 策略选择一个 interface；当前唯一已实现策略是 `uniform`。
+- 按所选 interface 的 `TypeNode` 树递归生成值树：基础类型按其取值范围分布采样，数组先按配置的 `array_len_range` 采样长度再逐元素生成，嵌套消息逐字段递归；字段或其嵌套成员若带默认值，先落默认值，再对其余位置生成。
 - 生成结果必须保证类型正确，即 `ValueTree` 与 `TypeNode` 逐节点匹配，这是向 topic publisher 或 service client 发送的前提。
 
 ### 4.4 非空池变异路径
 
-- 池非空时，调用 `PayloadPool::pick_for_mutation()` 选择一个曾触发新状态的 payload，选择概率由 `pool_item_select_probability` 控制。
+- 池非空时，调用 `PayloadPool::pick_for_mutation()` 按 `pool_selection` 策略选择一个曾触发新状态的 payload；当前唯一已实现策略是 `uniform`。
 - 被选 payload 的 `interface_id` 决定了变异所依据的 data files 与类型树，与论文"mutation is conducted recursively based on data files"一致。
 - 变异产出的新 payload 保留原 interface 绑定，只改值树内容，不跨 interface 变换。
 
@@ -130,7 +130,7 @@
 
 - 各 ROS 基础类型取值分布：配置项 `per_type_value_ranges`。
 - 字符串、数组、嵌套消息与边界值的具体变异算子：配置项 `operator_weights` 与 `operators_per_type`。
-- interface 与 pool item 的选择概率：配置项 `interface_select_probability` 与 `pool_item_select_probability`。
+- interface 与 pool item 的选择分布：配置项 `interface_selection` 与 `pool_selection`；当前只实现 `uniform`，不伪装成论文概率模型。
 - mutation energy 与递归深度：配置项 `mutation_energy` 与 `max_recursion_depth`。
 - payload 序列化实现：`Serializer` 的默认实现。
 - 数组长度分布：配置项 `array_len_range`。
