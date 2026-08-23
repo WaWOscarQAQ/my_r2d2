@@ -19,10 +19,16 @@ void init(const char* shm_name);
 void init(const char* shm_name, std::uint64_t registration_capacity,
           std::uint64_t runtime_capacity);
 
+// Attaches to an already-initialized shared memory object without
+// reinitializing it. Used by separate writer processes (e.g. the round
+// marker CLI) that only append records. Throws on magic/version mismatch.
+void attach(const char* shm_name);
+
 // Registration tracers, writing to the callback registration buffer.
 void rclcpp_callback_init(const void* rclcpp_handler, const void* rcl_handler,
                           CallbackType callback_type) noexcept;
-void rcl_callback_init(const char* callback_name, const void* rcl_handler) noexcept;
+void rcl_callback_init(const char* callback_name, const char* callback_namespace,
+                       const void* rcl_handler) noexcept;
 
 // Runtime tracers, writing to the runtime execution buffer.
 void executor_execute(const void* rclcpp_handler, std::uint64_t invoke_timestamp) noexcept;
@@ -30,6 +36,10 @@ void callback_start(const void* rclcpp_handler, std::uint64_t start_timestamp) n
 void callback_end(const void* rclcpp_handler, std::uint64_t end_timestamp) noexcept;
 void rcl_take(const void* rcl_handler, std::uint64_t buffer_size,
               std::uint64_t pub_timestamp, std::uint64_t sub_timestamp) noexcept;
+// Writes a RoundBoundary marker for one payload execution round. Not one of
+// the six paper tracers; it is the harness-side round delimiter (see
+// RuntimeEventType::RoundBoundary).
+void round_boundary(std::uint32_t round_id, std::uint64_t timestamp) noexcept;
 
 // Test accessors over the mapped image; null before init().
 const void* image();

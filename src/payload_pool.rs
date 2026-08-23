@@ -11,6 +11,25 @@
 use crate::payload::Payload;
 use rand::Rng;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionPolicy {
+    Uniform,
+}
+
+impl Default for SelectionPolicy {
+    fn default() -> Self {
+        Self::Uniform
+    }
+}
+
+impl SelectionPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Uniform => "uniform",
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct PayloadPool {
     items: Vec<Payload>,
@@ -39,12 +58,20 @@ impl PayloadPool {
         self.items.iter()
     }
 
-    /// Selects a payload for mutation. Uniform selection is a
+    /// Selects a payload for mutation. The active selection policy is a
     /// reproduction choice; the paper does not disclose the distribution.
-    pub fn pick_for_mutation(&self, rng: &mut impl Rng) -> Option<Payload> {
+    pub fn pick_for_mutation(
+        &self,
+        rng: &mut impl Rng,
+        policy: SelectionPolicy,
+    ) -> Option<Payload> {
         if self.items.is_empty() {
             return None;
         }
-        Some(self.items[rng.gen_range(0..self.items.len())].clone())
+        match policy {
+            SelectionPolicy::Uniform => {
+                Some(self.items[rng.gen_range(0..self.items.len())].clone())
+            }
+        }
     }
 }

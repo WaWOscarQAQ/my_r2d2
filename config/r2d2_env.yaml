@@ -1,0 +1,8 @@
+env:
+  R2D2_NAV2_WS: ../nav2_ws
+  R2D2_ROS_SETUP: /opt/ros/jazzy/setup.bash
+  R2D2_PYTHON_EXECUTABLE: /usr/bin/python3
+  R2D2_COSTMAP_PARAMS: ../nav2_ws/costmap_params.yaml
+  R2D2_SHM_PATH: /dev/shm/r2d2_nav2
+  R2D2_FUZZ_SOURCE: ../../nav2-_fuzz
+  ROS_DOMAIN_ID: "190"

@@ -21,6 +21,7 @@ fn reg(
     rclcpp_handler: u64,
     rcl_handler: u64,
     callback_name: &str,
+    callback_namespace: &str,
 ) -> RegistrationEvent {
     RegistrationEvent {
         source,
@@ -29,6 +30,8 @@ fn reg(
         rcl_handler,
         callback_name: callback_name.to_string(),
         callback_name_truncated: false,
+        callback_namespace: callback_namespace.to_string(),
+        callback_namespace_truncated: false,
     }
 }
 
@@ -84,6 +87,7 @@ fn runtime(
         buffer_size,
         pub_timestamp,
         sub_timestamp,
+        round_id: 0,
     }
 }
 
@@ -99,6 +103,7 @@ fn complete_registration() -> Vec<RegistrationEvent> {
             0x1000,
             0x2000,
             "",
+            "",
         ),
         reg(
             RegistrationSource::Rcl,
@@ -106,6 +111,7 @@ fn complete_registration() -> Vec<RegistrationEvent> {
             0,
             0x2000,
             "/cb",
+            "/ns",
         ),
     ]
 }
@@ -118,6 +124,7 @@ fn golden_registration() -> Vec<RegistrationEvent> {
             0x1000,
             0x2000,
             "",
+            "",
         ),
         reg(
             RegistrationSource::Rcl,
@@ -125,12 +132,14 @@ fn golden_registration() -> Vec<RegistrationEvent> {
             0,
             0x2000,
             "/cmd_vel_callback",
+            "/ns",
         ),
         reg(
             RegistrationSource::Rclcpp,
             CallbackType::Timer,
             0x3000,
             0x4000,
+            "",
             "",
         ),
         reg(
@@ -139,6 +148,7 @@ fn golden_registration() -> Vec<RegistrationEvent> {
             0,
             0x4000,
             "timer_callback",
+            "/ns",
         ),
     ]
 }
@@ -162,6 +172,10 @@ fn golden_fixture_builds_two_complete_callback_infos() {
     assert_eq!(infos[0].callback_type, CallbackType::Subscription);
     assert_eq!(infos[1].rcl_handler, 0x4000);
     assert_eq!(infos[1].callback_type, CallbackType::Timer);
+    // The namespace is a paper §4.1.1 registration attribute; it is
+    // collected but never enters the Figure 5 callback ID.
+    assert_eq!(infos[0].namespace, "/robot");
+    assert_eq!(infos[1].namespace, "/robot");
 }
 
 #[test]
@@ -193,12 +207,14 @@ fn incomplete_registration_never_produces_temporary_callback_id() {
         0,
         0x2000,
         "/solo",
+        "/ns",
     )];
     let rclcpp_only = vec![reg(
         RegistrationSource::Rclcpp,
         CallbackType::Service,
         0x1000,
         0x2000,
+        "",
         "",
     )];
 
@@ -216,6 +232,7 @@ fn callback_id_appears_once_and_stays_stable_across_drains() {
             0x1000,
             0x2000,
             "",
+            "",
         )],
         0,
     ));
@@ -228,6 +245,7 @@ fn callback_id_appears_once_and_stays_stable_across_drains() {
             0,
             0x2000,
             "/service",
+            "/ns",
         )],
         0,
     ));
@@ -246,13 +264,14 @@ fn callback_id_is_deterministic_and_differs_by_type() {
 
     let make = |kind| {
         build_callback_infos(&[
-            reg(RegistrationSource::Rclcpp, kind, 0x1000, 0x2000, ""),
+            reg(RegistrationSource::Rclcpp, kind, 0x1000, 0x2000, "", ""),
             reg(
                 RegistrationSource::Rcl,
                 CallbackType::Subscription,
                 0,
                 0x2000,
                 "/same",
+                "/ns",
             ),
         ])
     };
@@ -277,6 +296,7 @@ fn conflicting_registration_is_first_wins_and_invalidates_feedback() {
             0,
             0x2000,
             "/different",
+            "/ns",
         )],
         0,
     ));
@@ -336,8 +356,9 @@ fn missing_invoke_keeps_execution_latency_but_invalidates_feedback() {
 
 #[test]
 fn missing_invoke_alone_does_not_invalidate_feedback() {
-    // 应用层插桩（nav2 hooks）没有 executor_execute 事件：invoke 缺失是
-    // 常态。只要没有记录丢失，trace 仍可进入状态分析。
+    // live 路径应由 runtime interposer 提供 executor_execute；这里保留
+    // 的是降级/历史 trace 语义：只要没有记录丢失，invoke 缺失本身不拦截
+    // 状态分析。
     let registry = registry(complete_registration());
     let trace = profile_trace(
         &registry,
@@ -436,6 +457,7 @@ fn truncated_name_never_generates_callback_id() {
         0,
         0x2000,
         "partial",
+        "/ns",
     );
     truncated.callback_name_truncated = true;
     let mut registry = CallbackRegistry::new();
@@ -446,6 +468,7 @@ fn truncated_name_never_generates_callback_id() {
                 CallbackType::Subscription,
                 0x1000,
                 0x2000,
+                "",
                 "",
             ),
             truncated,
@@ -464,8 +487,109 @@ fn callback_info_exposes_paper_fields() {
         id: 42,
         name: "/cmd_vel".to_string(),
         callback_type: CallbackType::Subscription,
+        namespace: "/robot".to_string(),
         rclcpp_handler: 0x1000,
         rcl_handler: 0x2000,
     };
     assert_eq!(info.callback_type, CallbackType::Subscription);
+}
+
+#[test]
+fn truncated_namespace_never_generates_callback_id() {
+    let mut truncated = reg(
+        RegistrationSource::Rcl,
+        CallbackType::Subscription,
+        0,
+        0x2000,
+        "/cb",
+        "/very/long/namespace",
+    );
+    truncated.callback_namespace_truncated = true;
+    let mut registry = CallbackRegistry::new();
+    registry.ingest(&registration_drain(
+        vec![
+            reg(
+                RegistrationSource::Rclcpp,
+                CallbackType::Subscription,
+                0x1000,
+                0x2000,
+                "",
+                "",
+            ),
+            truncated,
+        ],
+        0,
+    ));
+
+    assert!(registry.callback_infos().is_empty());
+    assert_eq!(registry.truncated_callback_namespaces(), 1);
+    assert_eq!(registry.incomplete_registrations(), 1);
+    let trace = profile_trace(&registry, &runtime_drain(Vec::new(), 0));
+    assert!(!trace.valid_for_state_analysis());
+}
+
+#[test]
+fn same_name_and_type_across_namespaces_is_a_collision() {
+    // Figure 5 derives the ID from (name, type) only: two callbacks sharing
+    // both but living in different namespaces would collapse into one ID.
+    // The profile must detect the ambiguity and refuse feedback, without
+    // changing the paper-defined hash.
+    let events = vec![
+        reg(
+            RegistrationSource::Rclcpp,
+            CallbackType::Subscription,
+            0x1000,
+            0x2000,
+            "",
+            "",
+        ),
+        reg(
+            RegistrationSource::Rcl,
+            CallbackType::Subscription,
+            0,
+            0x2000,
+            "/cb",
+            "/ns_a",
+        ),
+        reg(
+            RegistrationSource::Rclcpp,
+            CallbackType::Subscription,
+            0x3000,
+            0x4000,
+            "",
+            "",
+        ),
+        reg(
+            RegistrationSource::Rcl,
+            CallbackType::Subscription,
+            0,
+            0x4000,
+            "/cb",
+            "/ns_b",
+        ),
+    ];
+    let registry = registry(events);
+    let infos = registry.callback_infos();
+    assert_eq!(infos.len(), 2);
+    assert_eq!(infos[0].id, infos[1].id, "paper ID ignores the namespace");
+
+    let trace = profile_trace(&registry, &runtime_drain(Vec::new(), 0));
+    assert_eq!(trace.diagnostics.callback_id_collisions, 1);
+    assert!(!trace.valid_for_state_analysis());
+}
+
+#[test]
+fn round_boundary_markers_are_framing_not_callbacks() {
+    let registry = registry(complete_registration());
+    let mut marker = runtime(RuntimeEventType::RoundBoundary, 0, 999, 0, 0, 0, 0);
+    marker.round_id = 3;
+    let trace = profile_trace(
+        &registry,
+        &runtime_drain(vec![start(0x1000, 20), marker, end(0x1000, 30)], 0),
+    );
+
+    assert_eq!(trace.call_trace.len(), 1);
+    assert_eq!(trace.diagnostics.unmatched_runtime_events, 0);
+    assert_eq!(trace.diagnostics.unknown_handlers, 0);
+    assert!(trace.valid_for_state_analysis());
 }

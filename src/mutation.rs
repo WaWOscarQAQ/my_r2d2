@@ -10,7 +10,7 @@
 //! per-type value ranges, and the array length distribution are not
 //! disclosed by the paper and are parameterized here.
 
-use crate::interface_extractor::{Primitive, TypeNode};
+use crate::interface_extractor::{Constraint, Field, Literal, Primitive, TypeNode};
 use crate::payload::{Value, ValueTree};
 use crate::payload_generator::GeneratorConfig;
 use rand::Rng;
@@ -92,29 +92,130 @@ impl Default for OperatorsPerType {
 pub fn generate_value(ty: &TypeNode, rng: &mut impl Rng, config: &GeneratorConfig) -> ValueTree {
     match ty {
         TypeNode::Primitive(primitive) => {
-            ValueTree::Leaf(generate_primitive(*primitive, rng, config))
+            ValueTree::Leaf(generate_primitive(*primitive, ty, rng, config))
         }
         TypeNode::Nested(fields) => ValueTree::Nested(
             fields
                 .iter()
-                .map(|field| generate_value(&field.ty, rng, config))
+                .map(|field| generate_field_value(field, rng, config))
                 .collect(),
         ),
         TypeNode::Array(element, fixed_len) => {
-            let len = match fixed_len {
-                Some(len) => *len,
-                None => rng.gen_range(config.array_len_range.clone()),
-            };
+            let len = sample_array_len(*fixed_len, ty.array_bound(), config, rng);
             ValueTree::Array(
                 (0..len)
                     .map(|_| generate_value(element, rng, config))
                     .collect(),
             )
         }
+        TypeNode::Constrained(inner, Constraint::StringMaxLen(max)) => {
+            match generate_value(inner, rng, config) {
+                ValueTree::Leaf(Value::String(mut text)) => {
+                    if text.len() > *max {
+                        text.truncate(*max);
+                    }
+                    ValueTree::Leaf(Value::String(text))
+                }
+                other => other,
+            }
+        }
+        TypeNode::Constrained(inner, Constraint::ArrayMaxLen(max)) => {
+            match generate_value(inner, rng, config) {
+                ValueTree::Array(mut items) => {
+                    if items.len() > *max {
+                        items.truncate(*max);
+                    }
+                    ValueTree::Array(items)
+                }
+                other => other,
+            }
+        }
     }
 }
 
-fn generate_primitive(primitive: Primitive, rng: &mut impl Rng, config: &GeneratorConfig) -> Value {
+fn generate_field_value(field: &Field, rng: &mut impl Rng, config: &GeneratorConfig) -> ValueTree {
+    field
+        .default_value
+        .as_ref()
+        .and_then(|default| literal_to_value_tree(default, &field.ty))
+        .unwrap_or_else(|| generate_value(&field.ty, rng, config))
+}
+
+fn literal_to_value_tree(literal: &Literal, ty: &TypeNode) -> Option<ValueTree> {
+    match (literal, ty) {
+        (Literal::Bool(v), TypeNode::Primitive(Primitive::Bool)) => {
+            Some(ValueTree::Leaf(Value::Bool(*v)))
+        }
+        (Literal::I8(v), TypeNode::Primitive(Primitive::I8)) => {
+            Some(ValueTree::Leaf(Value::I8(*v)))
+        }
+        (Literal::U8(v), TypeNode::Primitive(Primitive::U8)) => {
+            Some(ValueTree::Leaf(Value::U8(*v)))
+        }
+        (Literal::I16(v), TypeNode::Primitive(Primitive::I16)) => {
+            Some(ValueTree::Leaf(Value::I16(*v)))
+        }
+        (Literal::U16(v), TypeNode::Primitive(Primitive::U16)) => {
+            Some(ValueTree::Leaf(Value::U16(*v)))
+        }
+        (Literal::I32(v), TypeNode::Primitive(Primitive::I32)) => {
+            Some(ValueTree::Leaf(Value::I32(*v)))
+        }
+        (Literal::U32(v), TypeNode::Primitive(Primitive::U32)) => {
+            Some(ValueTree::Leaf(Value::U32(*v)))
+        }
+        (Literal::I64(v), TypeNode::Primitive(Primitive::I64)) => {
+            Some(ValueTree::Leaf(Value::I64(*v)))
+        }
+        (Literal::U64(v), TypeNode::Primitive(Primitive::U64)) => {
+            Some(ValueTree::Leaf(Value::U64(*v)))
+        }
+        (Literal::F32(bits), TypeNode::Primitive(Primitive::F32)) => {
+            Some(ValueTree::Leaf(Value::F32(f32::from_bits(*bits))))
+        }
+        (Literal::F64(bits), TypeNode::Primitive(Primitive::F64)) => {
+            Some(ValueTree::Leaf(Value::F64(f64::from_bits(*bits))))
+        }
+        (Literal::String(text), TypeNode::Primitive(Primitive::String)) => {
+            Some(ValueTree::Leaf(Value::String(text.clone())))
+        }
+        (Literal::Nested(items), TypeNode::Nested(fields)) => {
+            if items.len() != fields.len() {
+                return None;
+            }
+            Some(ValueTree::Nested(
+                items
+                    .iter()
+                    .zip(fields.iter())
+                    .map(|(item, field)| literal_to_value_tree(item, &field.ty))
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
+        (Literal::Array(items), TypeNode::Array(element, fixed_len)) => {
+            if fixed_len.is_some_and(|len| len != items.len()) {
+                return None;
+            }
+            Some(ValueTree::Array(
+                items
+                    .iter()
+                    .map(|item| literal_to_value_tree(item, element))
+                    .collect::<Option<Vec<_>>>()?,
+            ))
+        }
+        (literal, TypeNode::Constrained(inner, constraint)) => {
+            let value = literal_to_value_tree(literal, inner)?;
+            value_satisfies_constraint(&value, constraint).then_some(value)
+        }
+        _ => None,
+    }
+}
+
+fn generate_primitive(
+    primitive: Primitive,
+    ty: &TypeNode,
+    rng: &mut impl Rng,
+    config: &GeneratorConfig,
+) -> Value {
     let range = config.per_type_value_ranges.get(primitive);
     match primitive {
         Primitive::Bool => Value::Bool(rng.gen_bool(0.5)),
@@ -141,19 +242,50 @@ fn generate_primitive(primitive: Primitive, rng: &mut impl Rng, config: &Generat
         Primitive::F32 => Value::F32(rng.gen_range(range.min..=range.max) as f32),
         Primitive::F64 => Value::F64(rng.gen_range(range.min..=range.max)),
         Primitive::String => {
-            let len = len_range(primitive, config, rng);
+            let len = len_range(primitive, ty.string_bound(), config, rng);
             Value::String(random_printable(rng, len))
         }
         Primitive::Bytes => {
-            let len = len_range(primitive, config, rng);
+            let len = len_range(primitive, None, config, rng);
             Value::Bytes(random_bytes(rng, len))
         }
     }
 }
 
-fn len_range(primitive: Primitive, config: &GeneratorConfig, rng: &mut impl Rng) -> usize {
+fn len_range(
+    primitive: Primitive,
+    bound: Option<usize>,
+    config: &GeneratorConfig,
+    rng: &mut impl Rng,
+) -> usize {
     let range = config.per_type_value_ranges.get(primitive);
-    rng.gen_range((range.min as usize)..=(range.max as usize))
+    let max = bound.map_or(range.max as usize, |limit| limit.min(range.max as usize));
+    let min = (range.min as usize).min(max);
+    rng.gen_range(min..=max)
+}
+
+fn sample_array_len(
+    fixed_len: Option<usize>,
+    bound: Option<usize>,
+    config: &GeneratorConfig,
+    rng: &mut impl Rng,
+) -> usize {
+    if let Some(len) = fixed_len {
+        return len;
+    }
+    let max = bound.map_or(*config.array_len_range.end(), |limit| {
+        limit.min(*config.array_len_range.end())
+    });
+    let min = (*config.array_len_range.start()).min(max);
+    rng.gen_range(min..=max)
+}
+
+fn value_satisfies_constraint(value: &ValueTree, constraint: &Constraint) -> bool {
+    match (value, constraint) {
+        (ValueTree::Leaf(Value::String(text)), Constraint::StringMaxLen(max)) => text.len() <= *max,
+        (ValueTree::Array(items), Constraint::ArrayMaxLen(max)) => items.len() <= *max,
+        _ => true,
+    }
 }
 
 fn random_printable(rng: &mut impl Rng, len: usize) -> String {
@@ -239,6 +371,9 @@ fn walk_paths(
                 path.pop();
             }
         }
+        (value, TypeNode::Constrained(inner, _)) => {
+            walk_paths(value, inner, depth, max_depth, path, out);
+        }
         _ => {}
     }
 }
@@ -246,10 +381,14 @@ fn walk_paths(
 fn type_at<'a>(ty: &'a TypeNode, path: &[usize]) -> Option<&'a TypeNode> {
     let mut current = ty;
     for &index in path {
+        while let TypeNode::Constrained(inner, _) = current {
+            current = inner;
+        }
         current = match current {
             TypeNode::Nested(fields) => &fields.get(index)?.ty,
             TypeNode::Array(element, _) => element.as_ref(),
             TypeNode::Primitive(_) => return None,
+            TypeNode::Constrained(_, _) => unreachable!(),
         };
     }
     Some(current)
@@ -274,12 +413,14 @@ fn pick_operator(
     rng: &mut impl Rng,
 ) -> Option<OpKind> {
     let allowed = match (value, ty) {
-        (ValueTree::Leaf(Value::String(_) | Value::Bytes(_)), TypeNode::Primitive(_)) => {
+        (ValueTree::Leaf(Value::String(_) | Value::Bytes(_)), _) if ty.as_primitive().is_some() => {
             &config.operators_per_type.string
         }
-        (ValueTree::Leaf(_), TypeNode::Primitive(_)) => &config.operators_per_type.primitive,
-        (ValueTree::Array(_), TypeNode::Array(_, _)) => &config.operators_per_type.array,
-        (ValueTree::Nested(_), TypeNode::Nested(_)) => &config.operators_per_type.nested,
+        (ValueTree::Leaf(_), _) if ty.as_primitive().is_some() => {
+            &config.operators_per_type.primitive
+        }
+        (ValueTree::Array(_), _) if ty.as_array().is_some() => &config.operators_per_type.array,
+        (ValueTree::Nested(_), _) if ty.as_nested().is_some() => &config.operators_per_type.nested,
         _ => return None,
     };
     let candidates: Vec<OpKind> = allowed
@@ -339,11 +480,13 @@ fn applicable(op: OpKind, value: &ValueTree, ty: &TypeNode) -> bool {
             )
         ),
         OpKind::Resample => true,
-        OpKind::Resize => matches!(
-            (value, ty),
-            (ValueTree::Leaf(Value::String(_) | Value::Bytes(_)), _)
-                | (ValueTree::Array(_), TypeNode::Array(_, None))
-        ),
+        OpKind::Resize => {
+            matches!(value, ValueTree::Leaf(Value::String(_) | Value::Bytes(_)))
+                || matches!(
+                    (value, ty.as_array()),
+                    (ValueTree::Array(_), Some((_, None)))
+                )
+        }
         OpKind::ByteEdit => {
             matches!(value, ValueTree::Leaf(Value::String(_) | Value::Bytes(_)))
         }
@@ -375,6 +518,7 @@ fn apply_at(
             }
             ValueTree::Array(values)
         }
+        (value, TypeNode::Constrained(inner, _)) => apply_at(value, inner, path, op, config, rng),
         (other, _) => other,
     }
 }
@@ -419,8 +563,10 @@ fn boundary(
     config: &GeneratorConfig,
     rng: &mut impl Rng,
 ) -> ValueTree {
-    let TypeNode::Primitive(primitive) = ty else {
-        return value;
+    let primitive = match ty {
+        TypeNode::Primitive(primitive) => *primitive,
+        TypeNode::Constrained(inner, _) => return boundary(value, inner, config, rng),
+        _ => return value,
     };
     let current = match &value {
         ValueTree::Leaf(Value::I8(v)) => Some(*v as f64),
@@ -438,7 +584,7 @@ fn boundary(
     let Some(current) = current else {
         return value;
     };
-    let range = config.per_type_value_ranges.get(*primitive);
+    let range = config.per_type_value_ranges.get(primitive);
     let candidates: Vec<f64> = [range.min, 0.0, range.max]
         .into_iter()
         .filter(|candidate| (*candidate - current).abs() > f64::EPSILON)
@@ -470,8 +616,10 @@ fn resize(
     rng: &mut impl Rng,
 ) -> ValueTree {
     match (value, ty) {
-        (ValueTree::Leaf(Value::String(mut text)), TypeNode::Primitive(_)) => {
-            let len = len_range(Primitive::String, config, rng);
+        (ValueTree::Leaf(Value::String(mut text)), _)
+            if ty.as_primitive() == Some(Primitive::String) =>
+        {
+            let len = len_range(Primitive::String, ty.string_bound(), config, rng);
             if text.len() > len {
                 text.truncate(len);
             } else {
@@ -482,8 +630,10 @@ fn resize(
             }
             ValueTree::Leaf(Value::String(text))
         }
-        (ValueTree::Leaf(Value::Bytes(mut bytes)), TypeNode::Primitive(_)) => {
-            let len = len_range(Primitive::Bytes, config, rng);
+        (ValueTree::Leaf(Value::Bytes(mut bytes)), _)
+            if ty.as_primitive() == Some(Primitive::Bytes) =>
+        {
+            let len = len_range(Primitive::Bytes, None, config, rng);
             if bytes.len() > len {
                 bytes.truncate(len);
             } else {
@@ -492,7 +642,7 @@ fn resize(
             ValueTree::Leaf(Value::Bytes(bytes))
         }
         (ValueTree::Array(mut items), TypeNode::Array(element, None)) => {
-            let len = rng.gen_range(config.array_len_range.clone());
+            let len = sample_array_len(None, ty.array_bound(), config, rng);
             if items.len() > len {
                 items.truncate(len);
             } else {
@@ -503,6 +653,7 @@ fn resize(
             }
             ValueTree::Array(items)
         }
+        (value, TypeNode::Constrained(inner, _)) => resize(value, inner, config, rng),
         (other, _) => other,
     }
 }

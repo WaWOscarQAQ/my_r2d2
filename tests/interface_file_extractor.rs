@@ -1,4 +1,4 @@
-use my_r2d2::interface_extractor::{Extractor, FileExtractor, Kind, Primitive, TypeNode};
+use my_r2d2::interface_extractor::{Extractor, FileExtractor, Kind, Literal, Primitive, TypeNode};
 use std::path::Path;
 
 fn fixture(path: &str) -> std::path::PathBuf {
@@ -72,6 +72,10 @@ fn fixtures_root() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ros_interfaces")
 }
 
+fn jazzy_share_root() -> std::path::PathBuf {
+    Path::new("/opt/ros/jazzy/share").to_path_buf()
+}
+
 fn nested<'a>(ty: &'a TypeNode) -> &'a [my_r2d2::interface_extractor::Field] {
     let TypeNode::Nested(fields) = ty else {
         panic!("expected nested node, got {ty:?}");
@@ -87,6 +91,17 @@ fn find<'a>(
         .iter()
         .find(|field| field.name == name)
         .unwrap_or_else(|| panic!("field {name:?} not found"))
+}
+
+fn find_constant<'a>(
+    interface: &'a my_r2d2::interface_extractor::Interface,
+    name: &str,
+) -> &'a my_r2d2::interface_extractor::Constant {
+    interface.data_files[0]
+        .constants
+        .iter()
+        .find(|constant| constant.name == name)
+        .unwrap_or_else(|| panic!("constant {name:?} not found"))
 }
 
 /// nav2_msgs/srv/LoadMap —— nav2 fuzzer 的实际目标。
@@ -252,17 +267,52 @@ fn non_msg_srv_extension_is_rejected() {
 }
 
 #[test]
-fn constants_are_rejected_with_file_and_line() {
-    let err = extract_err("broken/msg/Constants.msg");
-    assert!(err.contains("constants are not represented"), "got: {err}");
-    assert!(err.contains("Constants.msg:1"), "got: {err}");
+fn parses_official_pointcloud2_shape() {
+    let share = jazzy_share_root();
+    let pointcloud = share.join("sensor_msgs/msg/PointCloud2.msg");
+    if !pointcloud.exists() {
+        return;
+    }
+
+    let extractor = FileExtractor::new(vec![pointcloud], vec![share]);
+    let interface = extractor.extract().unwrap().remove(0);
+
+    assert_eq!(interface.name, "PointCloud2");
+    assert_eq!(interface.kind, Kind::Topic);
+    assert_eq!(interface.fields.len(), 9);
+
+    let TypeNode::Array(element, None) = &find(&interface.fields, "fields").ty else {
+        panic!("PointCloud2.fields must be a variable-length PointField array");
+    };
+    let point_fields = nested(element);
+    assert_eq!(
+        point_fields
+            .iter()
+            .map(|field| field.name.as_str())
+            .collect::<Vec<_>>(),
+        ["name", "offset", "datatype", "count"]
+    );
 }
 
 #[test]
-fn defaults_are_rejected_with_file_and_line() {
-    let err = extract_err("broken/msg/Defaults.msg");
-    assert!(err.contains("defaults are not represented"), "got: {err}");
-    assert!(err.contains("Defaults.msg:1"), "got: {err}");
+fn parses_official_quaternion_shape() {
+    let share = jazzy_share_root();
+    let quaternion = share.join("geometry_msgs/msg/Quaternion.msg");
+    if !quaternion.exists() {
+        return;
+    }
+
+    let extractor = FileExtractor::new(vec![quaternion], vec![share]);
+    let interface = extractor.extract().unwrap().remove(0);
+
+    assert_eq!(interface.name, "Quaternion");
+    assert_eq!(interface.fields.len(), 4);
+    assert!(
+        interface
+            .fields
+            .iter()
+            .all(|field| field.ty == TypeNode::Primitive(Primitive::F64))
+    );
 }
 
 #[test]
@@ -278,11 +328,151 @@ fn malformed_array_bound_is_rejected() {
 }
 
 #[test]
-fn bounded_types_are_rejected() {
-    // `string<=10` 中的 `=` 先命中 parse_fields 的常量检查，
-    // parse_type 里的 bounded 分支是防御性代码，实际走不到。
-    let err = extract_err("broken/msg/Bounded.msg");
-    assert!(err.contains("constants are not represented"), "got: {err}");
+fn parses_bounded_string_fixture() {
+    let interface = FileExtractor::from_file(fixture("broken/msg/Bounded.msg"))
+        .extract()
+        .unwrap()
+        .remove(0);
+
+    let field = find(&interface.fields, "name");
+    assert_eq!(field.ty, TypeNode::bounded_string(10));
+    assert_eq!(field.default_value, None);
+}
+
+#[test]
+fn parses_default_value_fixture() {
+    let interface = FileExtractor::from_file(fixture("broken/msg/Defaults.msg"))
+        .extract()
+        .unwrap()
+        .remove(0);
+
+    let field = find(&interface.fields, "x");
+    assert_eq!(field.ty, TypeNode::Primitive(Primitive::I32));
+    assert_eq!(field.default_value, Some(Literal::I32(5)));
+}
+
+#[test]
+fn parses_constant_fixture() {
+    let interface = FileExtractor::from_file(fixture("broken/msg/Constants.msg"))
+        .extract()
+        .unwrap()
+        .remove(0);
+
+    assert!(interface.fields.is_empty());
+    assert_eq!(interface.data_files[0].constants.len(), 1);
+    let constant = find_constant(&interface, "X");
+    assert_eq!(constant.ty, TypeNode::Primitive(Primitive::I32));
+    assert_eq!(constant.value, Literal::I32(1));
+}
+
+#[test]
+fn parses_nested_defaults_and_nested_array_defaults() {
+    let interface = FileExtractor::new(
+        vec![fixture("broken/msg/NestedDefaults.msg")],
+        vec![fixtures_root()],
+    )
+    .extract()
+    .unwrap()
+    .remove(0);
+
+    let stamp = find(&interface.fields, "stamp");
+    assert_eq!(
+        stamp.default_value,
+        Some(Literal::Nested(vec![Literal::I32(1), Literal::U32(2)]))
+    );
+
+    let history = find(&interface.fields, "history");
+    assert_eq!(
+        history.default_value,
+        Some(Literal::Array(vec![
+            Literal::Nested(vec![Literal::I32(3), Literal::U32(4)]),
+            Literal::Nested(vec![Literal::I32(5), Literal::U32(6)]),
+        ]))
+    );
+}
+
+#[test]
+fn parses_nested_constant_fixture() {
+    let interface = FileExtractor::new(
+        vec![fixture("broken/msg/NestedConstants.msg")],
+        vec![fixtures_root()],
+    )
+    .extract()
+    .unwrap()
+    .remove(0);
+
+    assert!(interface.fields.is_empty());
+    let constant = find_constant(&interface, "ZERO");
+    assert_eq!(
+        constant.value,
+        Literal::Nested(vec![Literal::I32(0), Literal::U32(0)])
+    );
+}
+
+#[test]
+fn parses_official_test_msgs_defaults_constants_and_bounded_sequences() {
+    let share = jazzy_share_root();
+
+    let defaults = share.join("test_msgs/msg/Defaults.msg");
+    if defaults.exists() {
+        let interface = FileExtractor::new(vec![defaults], vec![share.clone()])
+            .extract()
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            find(&interface.fields, "bool_value").default_value,
+            Some(Literal::Bool(true))
+        );
+        assert_eq!(
+            find(&interface.fields, "int32_value").default_value,
+            Some(Literal::I32(-30_000))
+        );
+        assert_eq!(
+            find(&interface.fields, "uint64_value").default_value,
+            Some(Literal::U64(50_000_000))
+        );
+    }
+
+    let constants = share.join("test_msgs/msg/Constants.msg");
+    if constants.exists() {
+        let interface = FileExtractor::new(vec![constants], vec![share.clone()])
+            .extract()
+            .unwrap()
+            .remove(0);
+        assert!(interface.fields.is_empty());
+        assert_eq!(
+            find_constant(&interface, "BOOL_CONST").value,
+            Literal::Bool(true)
+        );
+        assert_eq!(
+            find_constant(&interface, "UINT64_CONST").value,
+            Literal::U64(50_000_000)
+        );
+    }
+
+    let bounded = share.join("test_msgs/msg/BoundedSequences.msg");
+    if bounded.exists() {
+        let interface = FileExtractor::new(vec![bounded], vec![share])
+            .extract()
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            find(&interface.fields, "bool_values").ty,
+            TypeNode::bounded_array(Primitive::Bool.into(), 3)
+        );
+        assert_eq!(
+            find(&interface.fields, "string_values_default").default_value,
+            Some(Literal::Array(vec![
+                Literal::String(String::new()),
+                Literal::String("max value".to_string()),
+                Literal::String("min value".to_string()),
+            ]))
+        );
+        assert_eq!(
+            find(&interface.fields, "alignment_check").ty,
+            TypeNode::Primitive(Primitive::I32)
+        );
+    }
 }
 
 #[test]

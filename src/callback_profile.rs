@@ -6,10 +6,14 @@
 //!
 //! ## Reproduction choices（论文未披露，此处自行确定）
 //! * Hash 算法为 FNV-1a 64 位，name 与 type 之间加入分隔字节。
+//! * namespace 按论文 §4.1.1 作为注册属性采集并存入 `CallbackInfo`，但
+//!   按 Figure 5 不参与 ID；同一 (name, type) 跨 namespace 出现时计为
+//!   `callback_id_collisions` 并使 trace 失去状态反馈资格。
 //! * scheduling latency 在 invoke 缺失时为 unknown；execution latency 仍按
 //!   论文的 start/end 计算。invoke 缺失单独计为 `missing_invokes`，其本身
-//!   不取消 trace 的状态反馈资格（应用层插桩没有 executor_execute 事件，
-//!   这是常态）；真正的记录丢失由 `lossy`（drain 的 missed 计数）拦截。
+//!   不取消 trace 的状态反馈资格（当前 live 路径的 runtime interposer
+//!   预期会提供 `executor_execute`；该分支保留给降级采集或历史 app-hook
+//!   trace）；真正的记录丢失由 `lossy`（drain 的 missed 计数）拦截。
 //! * throughput 单位为 bytes/ns；`sub <= pub` 时不生成度量并记录异常。
 
 use std::collections::{HashMap, HashSet};
@@ -26,6 +30,8 @@ pub struct CallbackInfo {
     pub id: u64,
     pub name: String,
     pub callback_type: CallbackType,
+    /// 论文 §4.1.1 列为注册属性的 namespace；按 Figure 5 不参与 ID。
+    pub namespace: String,
     pub rclcpp_handler: u64,
     pub rcl_handler: u64,
 }
@@ -56,9 +62,16 @@ pub struct TraceDiagnostics {
     pub incomplete_registrations: u64,
     pub registration_conflicts: u64,
     pub truncated_callback_names: u64,
+    pub truncated_callback_namespaces: u64,
+    /// 同一 `(name, type)` 对应多个不同 namespace 的次数。Figure 5 的 ID
+    /// 公式只哈希 name 与 type，此时不同回调会得到相同 ID；检测到即视为
+    /// 数据歧义，trace 失去状态反馈资格（不改变论文公式本身的保守防护）。
+    pub callback_id_collisions: u64,
     pub invalid_timestamp_order: u64,
-    /// start 没有对应 invoke 的次数。应用层插桩没有 executor_execute 事件，
-    /// 这是常态而非错误，因此单独计数、不影响状态分析资格。
+    /// start 没有对应 invoke 的次数。当前 live 路径预期由 runtime
+    /// interposer 提供 `executor_execute`；缺失通常意味着降级采集、
+    /// 历史 app-hook trace 或局部记录缺口，因此单独计数、不直接取消
+    /// 状态分析资格。
     pub missing_invokes: u64,
     pub unmatched_runtime_events: u64,
     pub unknown_handlers: u64,
@@ -82,6 +95,8 @@ impl CallbackTrace {
             && self.diagnostics.incomplete_registrations == 0
             && self.diagnostics.registration_conflicts == 0
             && self.diagnostics.truncated_callback_names == 0
+            && self.diagnostics.truncated_callback_namespaces == 0
+            && self.diagnostics.callback_id_collisions == 0
             && self.diagnostics.invalid_timestamp_order == 0
             && self.diagnostics.unmatched_runtime_events == 0
             && self.diagnostics.unknown_handlers == 0
@@ -92,12 +107,14 @@ impl CallbackTrace {
 /// 跨 shared-memory drain 保存两层注册信息。
 #[derive(Debug, Default)]
 pub struct CallbackRegistry {
-    names: HashMap<u64, String>,
+    /// rcl_handler -> (callback name, callback namespace)，来自 RCL 层记录。
+    names: HashMap<u64, (String, String)>,
     rclcpp: HashMap<u64, (u64, CallbackType)>,
     seen_handlers: HashSet<u64>,
     registration_records_missed: u64,
     registration_conflicts: u64,
     truncated_callback_names: u64,
+    truncated_callback_namespaces: u64,
 }
 
 impl CallbackRegistry {
@@ -124,7 +141,7 @@ impl CallbackRegistry {
 
         keys.into_iter()
             .map(|rcl_handler| {
-                let name = self
+                let (name, namespace) = self
                     .names
                     .get(&rcl_handler)
                     .expect("complete registry entry has a name")
@@ -138,6 +155,7 @@ impl CallbackRegistry {
                     id: callback_id(&name, callback_type),
                     name,
                     callback_type,
+                    namespace,
                     rclcpp_handler,
                     rcl_handler,
                 }
@@ -155,6 +173,10 @@ impl CallbackRegistry {
 
     pub fn truncated_callback_names(&self) -> u64 {
         self.truncated_callback_names
+    }
+
+    pub fn truncated_callback_namespaces(&self) -> u64 {
+        self.truncated_callback_namespaces
     }
 
     pub fn incomplete_registrations(&self) -> u64 {
@@ -176,15 +198,23 @@ impl CallbackRegistry {
                             self.truncated_callback_names.saturating_add(1);
                         continue;
                     }
+                    if event.callback_namespace_truncated {
+                        self.truncated_callback_namespaces =
+                            self.truncated_callback_namespaces.saturating_add(1);
+                        continue;
+                    }
+                    let incoming = (
+                        event.callback_name.clone(),
+                        event.callback_namespace.clone(),
+                    );
                     match self.names.get(&event.rcl_handler) {
-                        Some(existing) if existing != &event.callback_name => {
+                        Some(existing) if existing != &incoming => {
                             self.registration_conflicts =
                                 self.registration_conflicts.saturating_add(1);
                         }
                         Some(_) => {}
                         None => {
-                            self.names
-                                .insert(event.rcl_handler, event.callback_name.clone());
+                            self.names.insert(event.rcl_handler, incoming);
                         }
                     }
                 }
@@ -228,6 +258,23 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
     let mut pending_invoke: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut pending_start: HashMap<u64, Vec<(u64, Option<u64>, u64)>> = HashMap::new();
 
+    // Figure 5 的 ID 只哈希 (name, type)；同一 (name, type) 出现在多个
+    // namespace 下时不同回调会得到相同 ID，属于数据歧义，显式计数并拦截。
+    let mut id_namespaces: HashMap<(&str, CallbackType), &str> = HashMap::new();
+    let mut callback_id_collisions: u64 = 0;
+    for info in &infos {
+        let key = (info.name.as_str(), info.callback_type);
+        match id_namespaces.get(&key) {
+            Some(existing) if *existing != info.namespace => {
+                callback_id_collisions += 1;
+            }
+            Some(_) => {}
+            None => {
+                id_namespaces.insert(key, info.namespace.as_str());
+            }
+        }
+    }
+
     let mut trace = CallbackTrace {
         lossy: registry.registration_records_missed() > 0 || runtime.missed > 0,
         diagnostics: TraceDiagnostics {
@@ -236,6 +283,8 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
             incomplete_registrations: registry.incomplete_registrations(),
             registration_conflicts: registry.registration_conflicts(),
             truncated_callback_names: registry.truncated_callback_names(),
+            truncated_callback_namespaces: registry.truncated_callback_namespaces(),
+            callback_id_collisions,
             ..TraceDiagnostics::default()
         },
         ..CallbackTrace::default()
@@ -243,6 +292,9 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
 
     for event in &runtime.events {
         match event.event_type {
+            // 轮次分界标记只是分段框架，不是回调事件；由调用方在分段时
+            // 消费，这里直接跳过，不计入任何诊断。
+            RuntimeEventType::RoundBoundary => {}
             RuntimeEventType::ExecutorExecute => {
                 if rclcpp_to_id.contains_key(&event.rclcpp_handler) {
                     pending_invoke

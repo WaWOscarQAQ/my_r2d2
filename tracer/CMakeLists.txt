@@ -16,6 +16,9 @@ target_compile_options(tracer PRIVATE -Wall -Wextra)
 add_executable(mock_writer src/mock_writer.cpp)
 target_link_libraries(mock_writer PRIVATE tracer)
 
+add_executable(round_marker src/round_marker.cpp)
+target_link_libraries(round_marker PRIVATE tracer)
+
 if(BUILD_TESTING)
   add_executable(tracer_safety_test tests/tracer_safety_test.cpp)
   target_link_libraries(tracer_safety_test PRIVATE tracer)

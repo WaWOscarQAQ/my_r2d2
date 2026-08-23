@@ -84,7 +84,9 @@ cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42 \
   burst/stamp_mode）。不传该参数则退化为纯随机生成 + 固定 20Hz×2s。
 - `--lcov-dir`：每轮结束后抓取 lcov 分支覆盖落盘。
 - `--tsan-log-dir`：TSAN 构建下加此参数，报告写入该目录（`tsan.<pid>`）；
-  每轮 SIGUSR1 触发 gcov dump 的 signal-unsafe 告警已在 TSAN_OPTIONS 中关闭。
+  每轮 SIGUSR1 触发 gcov dump 的 signal-unsafe 告警已通过 `launch_stack.sh`
+  导出的 `TSAN_OPTIONS=report_signal_unsafe=0` 关闭（本地脚本属 gitignore
+  的 nav2_ws，换机重建时需保留该导出）。
 
 TSAN 战役（1b 构建）全量指令：
 

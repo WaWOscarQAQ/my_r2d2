@@ -9,7 +9,7 @@
 //! so the concrete wire format behind `Serializer` is a reproduction
 //! choice (`SimpleSerializer`).
 
-use crate::interface_extractor::{Kind, Primitive, TypeNode};
+use crate::interface_extractor::{Constraint, Kind, Primitive, TypeNode};
 use std::fmt;
 
 /// A primitive value inside a payload.
@@ -129,6 +129,10 @@ impl Serializer for SimpleSerializer {
 
 fn encode(value: &ValueTree, ty: &TypeNode, out: &mut Vec<u8>) -> Result<(), Error> {
     match (value, ty) {
+        (value, TypeNode::Constrained(inner, constraint)) => {
+            validate_constraint(value, constraint)?;
+            encode(value, inner, out)?;
+        }
         (ValueTree::Leaf(Value::Bool(v)), TypeNode::Primitive(Primitive::Bool)) => {
             out.push(u8::from(*v));
         }
@@ -229,6 +233,11 @@ fn decode(cursor: &mut &[u8], ty: &TypeNode) -> Result<ValueTree, Error> {
             let bytes = take(cursor, len)?.to_vec();
             Ok(ValueTree::Leaf(Value::Bytes(bytes)))
         }
+        TypeNode::Constrained(inner, constraint) => {
+            let value = decode(cursor, inner)?;
+            validate_constraint(&value, constraint)?;
+            Ok(value)
+        }
         TypeNode::Primitive(primitive) => {
             let width = numeric_width(*primitive);
             let bytes = take(cursor, width)?;
@@ -256,6 +265,26 @@ fn decode(cursor: &mut &[u8], ty: &TypeNode) -> Result<ValueTree, Error> {
             }
             Ok(ValueTree::Array(values))
         }
+    }
+}
+
+fn validate_constraint(value: &ValueTree, constraint: &Constraint) -> Result<(), Error> {
+    match (value, constraint) {
+        (ValueTree::Leaf(Value::String(text)), Constraint::StringMaxLen(max))
+            if text.len() > *max =>
+        {
+            Err(Error::TypeMismatch {
+                expected: format!("string of at most {max} bytes"),
+                found: format!("string of {} bytes", text.len()),
+            })
+        }
+        (ValueTree::Array(values), Constraint::ArrayMaxLen(max)) if values.len() > *max => {
+            Err(Error::TypeMismatch {
+                expected: format!("array of at most {max} elements"),
+                found: format!("array of {} elements", values.len()),
+            })
+        }
+        _ => Ok(()),
     }
 }
 

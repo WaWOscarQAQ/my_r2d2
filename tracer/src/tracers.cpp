@@ -39,6 +39,20 @@ std::uint64_t address_of(const void* pointer) {
   return reinterpret_cast<std::uint64_t>(pointer);
 }
 
+// Copies a NUL-terminated string into a fixed-capacity record field,
+// truncating and setting `truncated_flag` when it does not fit.
+void copy_string_field(char* dest, std::size_t capacity, const char* source,
+                       std::uint32_t truncated_flag, std::uint32_t* len_out,
+                       std::uint32_t* flags) {
+  const std::size_t observed_len = ::strnlen(source, capacity + 1);
+  const std::size_t len = observed_len > capacity ? capacity : observed_len;
+  if (observed_len > capacity) {
+    *flags |= truncated_flag;
+  }
+  *len_out = static_cast<std::uint32_t>(len);
+  std::memcpy(dest, source, len);
+}
+
 [[noreturn]] void throw_system(const char* operation) {
   throw std::runtime_error(std::string(operation) + ": " + std::strerror(errno));
 }
@@ -91,6 +105,29 @@ void init(const char* shm_name) {
   init(shm_name, kDefaultRegistrationCapacity, kDefaultRuntimeCapacity);
 }
 
+void attach(const char* shm_name) {
+  if (g_shm.data() != nullptr) {
+    throw std::logic_error("tracer shared memory already initialized");
+  }
+  g_shm = SharedMemory::open(shm_name);
+
+  auto* base = static_cast<std::uint8_t*>(g_shm.data());
+  const auto* header = static_cast<const SharedHeader*>(g_shm.data());
+  if (header->magic != kTraceMagic || header->version != kTraceVersion) {
+    throw std::runtime_error("shared memory magic/version mismatch");
+  }
+  if (header->shm_size != g_shm.size() ||
+      header->registration_records_offset > header->shm_size ||
+      header->runtime_records_offset > header->shm_size) {
+    throw std::runtime_error("shared memory header is inconsistent");
+  }
+
+  const std::uint64_t registration_ring =
+      ring_bytes(header->registration_capacity, sizeof(RegistrationRecord));
+  g_registration.attach(base + align_up(sizeof(SharedHeader), 8));
+  g_runtime.attach(base + align_up(sizeof(SharedHeader), 8) + registration_ring);
+}
+
 void rclcpp_callback_init(const void* rclcpp_handler, const void* rcl_handler,
                           CallbackType callback_type) noexcept {
   if (g_shm.data() == nullptr) {
@@ -104,21 +141,21 @@ void rclcpp_callback_init(const void* rclcpp_handler, const void* rcl_handler,
   g_registration.push(record);
 }
 
-void rcl_callback_init(const char* callback_name, const void* rcl_handler) noexcept {
-  if (g_shm.data() == nullptr || callback_name == nullptr) {
+void rcl_callback_init(const char* callback_name, const char* callback_namespace,
+                       const void* rcl_handler) noexcept {
+  if (g_shm.data() == nullptr || callback_name == nullptr ||
+      callback_namespace == nullptr) {
     return;
   }
   RegistrationRecord record{};
   record.source = RegistrationSource::Rcl;
   record.rcl_handler = address_of(rcl_handler);
-  const std::size_t observed_len = ::strnlen(callback_name, kCallbackNameCapacity + 1);
-  const std::size_t len =
-      observed_len > kCallbackNameCapacity ? kCallbackNameCapacity : observed_len;
-  if (observed_len > kCallbackNameCapacity) {
-    record.flags |= kRegistrationFlagNameTruncated;
-  }
-  record.callback_name_len = static_cast<std::uint32_t>(len);
-  std::memcpy(record.callback_name, callback_name, len);
+  copy_string_field(record.callback_name, kCallbackNameCapacity, callback_name,
+                    kRegistrationFlagNameTruncated, &record.callback_name_len,
+                    &record.flags);
+  copy_string_field(record.callback_namespace, kCallbackNamespaceCapacity,
+                    callback_namespace, kRegistrationFlagNamespaceTruncated,
+                    &record.callback_namespace_len, &record.flags);
   g_registration.push(record);
 }
 
@@ -169,6 +206,17 @@ void rcl_take(const void* rcl_handler, std::uint64_t buffer_size,
   record.buffer_size = buffer_size;
   record.pub_timestamp = pub_timestamp;
   record.sub_timestamp = sub_timestamp;
+  g_runtime.push(record);
+}
+
+void round_boundary(std::uint32_t round_id, std::uint64_t timestamp) noexcept {
+  if (g_shm.data() == nullptr) {
+    return;
+  }
+  RuntimeRecord record{};
+  record.event_type = RuntimeEventType::RoundBoundary;
+  record.aux = round_id;
+  record.timestamp = timestamp;
   g_runtime.push(record);
 }
 
