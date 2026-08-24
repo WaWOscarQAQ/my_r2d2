@@ -57,12 +57,13 @@ use my_r2d2::utils::yaml_reader::YamlEnv;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use serde_json::json;
 use serde_yaml::Value as YamlValue;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::collections::BTreeSet;
 use std::thread;
 use std::time::{Duration, Instant};
 /// 每轮最多起几次 scan bridge。bridge 每轮都是全新 DDS participant，发现
@@ -152,6 +153,8 @@ struct Config {
     rounds: u64,
     seed: u64,
     benchmark_seconds: u64,
+    /// benchmark 阶段允许 parameter 接口累计占用的总墙钟时间（秒）。
+    benchmark_parameter_budget_seconds: u64,
     benchmark_model: Option<PathBuf>,
     oracle_mode: OracleMode,
     latency_factor: f64,
@@ -177,6 +180,7 @@ impl Config {
             rounds: 10,
             seed: 42,
             benchmark_seconds: 7_200,
+            benchmark_parameter_budget_seconds: 300,
             benchmark_model: None,
             oracle_mode: OracleMode::JazzyReproduction,
             latency_factor: 2.0,
@@ -206,6 +210,12 @@ impl Config {
                     config.benchmark_seconds = value("--benchmark-seconds")?
                         .parse::<u64>()
                         .map_err(|e| e.to_string())?
+                }
+                "--benchmark-parameter-budget-seconds" => {
+                    config.benchmark_parameter_budget_seconds =
+                        value("--benchmark-parameter-budget-seconds")?
+                            .parse::<u64>()
+                            .map_err(|e| e.to_string())?
                 }
                 "--benchmark-model" => {
                     config.benchmark_model = Some(PathBuf::from(value("--benchmark-model")?))
@@ -1197,7 +1207,8 @@ struct RoundExecution {
 
 #[allow(clippy::too_many_arguments)]
 fn execute_payload_round(
-    display_round: u64,
+    round_index: u64,
+    round_label: &str,
     marker_round: u64,
     payload: &Payload,
     binding: &InterfaceBinding,
@@ -1213,12 +1224,11 @@ fn execute_payload_round(
     config: &Config,
     stack: &mut std::process::Child,
 ) -> Result<RoundExecution, String> {
-    let round_label = format!("round {display_round}");
     let interface_label = binding.interface.name.clone();
     let endpoint_label = binding.endpoint_name().to_string();
     if !pending_events.is_empty() {
         eprintln!(
-            "round {display_round}: dropping {} carry-over events after previous boundary",
+            "{round_label}: dropping {} carry-over events after previous boundary",
             pending_events.len()
         );
         pending_events.clear();
@@ -1227,7 +1237,7 @@ fn execute_payload_round(
         drain_runtime_with_live_registry(&format!("{round_label} preflight"), reader, registry)?;
     if !stale.events.is_empty() || stale.missed != 0 {
         eprintln!(
-            "round {display_round}: dropping {} stale runtime events (missed={}) before payload send",
+            "{round_label}: dropping {} stale runtime events (missed={}) before payload send",
             stale.events.len(),
             stale.missed
         );
@@ -1241,8 +1251,7 @@ fn execute_payload_round(
 
     match &binding.endpoint {
         EndpointBinding::LaserScan { .. } => {
-            let schedule_slot =
-                schedules.get((display_round as usize - 1) % schedules.len().max(1));
+            let schedule_slot = schedules.get((round_index as usize - 1) % schedules.len().max(1));
             let (rate_hz, duration_sec, burst, burst_gap, max_publishes, stamp_mode) =
                 match schedule_slot {
                     Some((name, schedule)) => {
@@ -1282,7 +1291,7 @@ fn execute_payload_round(
             expected_msgs = sender.expected_messages();
             for attempt in 0..BRIDGE_ATTEMPTS {
                 if let Err(error) = sender.send(payload) {
-                    eprintln!("round {display_round}: {error}");
+                    eprintln!("{round_label}: {error}");
                 }
                 let drained = drain_runtime_with_live_registry(&round_label, reader, registry)?;
                 let attempt_trace = profile_trace(registry, &drained);
@@ -1296,7 +1305,7 @@ fn execute_payload_round(
                     && attempt + 1 < BRIDGE_ATTEMPTS
                 {
                     eprintln!(
-                        "round {display_round}: {delivered}/{} messages delivered (attempt {}), respawning bridge",
+                        "{round_label}: {delivered}/{} messages delivered (attempt {}), respawning bridge",
                         expected_msgs,
                         attempt + 1
                     );
@@ -1321,7 +1330,7 @@ fn execute_payload_round(
                 options.clone(),
             );
             if let Err(error) = sender.send(payload) {
-                eprintln!("round {display_round}: {error}");
+                eprintln!("{round_label}: {error}");
             }
             let drained = drain_runtime_with_live_registry(&round_label, reader, registry)?;
             let attempt_trace = profile_trace(registry, &drained);
@@ -1342,7 +1351,7 @@ fn execute_payload_round(
                 binding.interface.clone(),
             );
             if let Err(error) = sender.send(payload) {
-                eprintln!("round {display_round}: {error}");
+                eprintln!("{round_label}: {error}");
             }
             let drained = drain_runtime_with_live_registry(&round_label, reader, registry)?;
             let attempt_trace = profile_trace(registry, &drained);
@@ -1364,7 +1373,7 @@ fn execute_payload_round(
                 binding.interface.clone(),
             );
             if let Err(error) = sender.send(payload) {
-                eprintln!("round {display_round}: {error}");
+                eprintln!("{round_label}: {error}");
             }
             let drained = drain_runtime_with_live_registry(&round_label, reader, registry)?;
             let attempt_trace = profile_trace(registry, &drained);
@@ -1382,7 +1391,7 @@ fn execute_payload_round(
             .arg(marker_round.to_string())
             .status()
         {
-            eprintln!("round {display_round}: round_marker spawn failed: {error}");
+            eprintln!("{round_label}: round_marker spawn failed: {error}");
         }
         let drained = drain_runtime_with_live_registry(&round_label, reader, registry)
             .map_err(|error| format!("{error}; final marker drain"))?;
@@ -1408,7 +1417,7 @@ fn execute_payload_round(
     if let Some((sender, restore_value)) = parameter_restore {
         if !pending_events.is_empty() {
             eprintln!(
-                "round {display_round}: dropping {} post-marker events before parameter restore",
+                "{round_label}: dropping {} post-marker events before parameter restore",
                 pending_events.len()
             );
             pending_events.clear();
@@ -1433,7 +1442,7 @@ fn execute_payload_round(
     }
     if expected_msgs > 0 && last_delivered * 2 < expected_msgs && !trace.msg_trace.is_empty() {
         eprintln!(
-            "round {display_round}: only {last_delivered}/{} messages delivered after {} attempts",
+            "{round_label}: only {last_delivered}/{} messages delivered after {} attempts",
             expected_msgs, BRIDGE_ATTEMPTS
         );
     }
@@ -1465,11 +1474,60 @@ fn build_benchmark_model_live(
     schedules: &[(String, Schedule)],
     stack: &mut std::process::Child,
 ) -> Result<(BenchmarkModel, u64), String> {
+    let lcov_root = config.lcov_dir.as_deref();
+    let parameter_budget = Duration::from_secs(config.benchmark_parameter_budget_seconds);
+    let mut parameter_spent = Duration::ZERO;
+    let mut parameter_skips = 0u64;
+    let mut parameter_budget_announced = false;
+    write_benchmark_status(
+        lcov_root,
+        "sampling",
+        config.benchmark_seconds,
+        Duration::ZERO,
+        0,
+        0,
+        0,
+        0,
+        parameter_spent,
+        parameter_budget,
+        parameter_skips,
+        Some("benchmark bootstrap"),
+    );
     if let Some(path) = &config.benchmark_model
         && path.exists()
     {
         println!("benchmark: loading model from {}", path.display());
-        return BenchmarkModel::load_json(path).map(|model| (model, 0));
+        let model = BenchmarkModel::load_json(path)?;
+        write_benchmark_status(
+            lcov_root,
+            "complete",
+            config.benchmark_seconds,
+            Duration::ZERO,
+            0,
+            model.analyzed_traces,
+            0,
+            0,
+            parameter_spent,
+            parameter_budget,
+            parameter_skips,
+            Some("loaded precomputed benchmark model"),
+        );
+        write_benchmark_summary(
+            lcov_root,
+            "precomputed-model",
+            config.benchmark_seconds,
+            Duration::ZERO,
+            0,
+            model.analyzed_traces,
+            0,
+            0,
+            parameter_spent,
+            parameter_budget,
+            parameter_skips,
+            model.edge_count(),
+            model.distinct_callbacks(),
+        );
+        return Ok((model, 0));
     }
     if config.benchmark_seconds == 0 {
         return Err(
@@ -1494,8 +1552,9 @@ fn build_benchmark_model_live(
     let mut round = 0u64;
 
     println!(
-        "benchmark: sampling for {}s to build callback graph and average benchmarks",
-        config.benchmark_seconds
+        "benchmark: sampling for {}s to build callback graph and average benchmarks (parameter budget={}s)",
+        config.benchmark_seconds,
+        config.benchmark_parameter_budget_seconds
     );
     while Instant::now() < deadline {
         round += 1;
@@ -1511,8 +1570,38 @@ fn build_benchmark_model_live(
                 payload.interface_id
             )
         })?;
+        let round_label = format!("benchmark round {round}");
+        let parameter_binding = matches!(binding.endpoint, EndpointBinding::Parameter { .. });
+        if parameter_binding && parameter_spent >= parameter_budget {
+            parameter_skips += 1;
+            if !parameter_budget_announced {
+                eprintln!(
+                    "benchmark: parameter budget exhausted at {}s/{}s; skipping parameter interfaces for the remaining benchmark window",
+                    parameter_spent.as_secs(),
+                    parameter_budget.as_secs()
+                );
+                parameter_budget_announced = true;
+            }
+            write_benchmark_status(
+                lcov_root,
+                "sampling",
+                config.benchmark_seconds,
+                start.elapsed(),
+                round,
+                builder.analyzed_traces(),
+                builder.empty_traces(),
+                builder.invalid_traces(),
+                parameter_spent,
+                parameter_budget,
+                parameter_skips,
+                Some("parameter interface skipped after budget exhaustion"),
+            );
+            continue;
+        }
+        let execution_started = Instant::now();
         let execution = match execute_payload_round(
             round,
+            &round_label,
             round,
             &payload,
             binding,
@@ -1528,8 +1617,16 @@ fn build_benchmark_model_live(
             config,
             stack,
         ) {
-            Ok(execution) => execution,
+            Ok(execution) => {
+                if parameter_binding {
+                    parameter_spent += execution_started.elapsed();
+                }
+                execution
+            }
             Err(message) => {
+                if parameter_binding {
+                    parameter_spent += execution_started.elapsed();
+                }
                 builder.record_invalid_round();
                 eprintln!("benchmark round {round}: {message}");
                 if !stack_alive(stack) {
@@ -1558,6 +1655,20 @@ fn build_benchmark_model_live(
                     registry.callback_infos().len()
                 );
                 bootstrap_map_if_available(bindings, config, ros_setup, install_setup, domain_id);
+                write_benchmark_status(
+                    lcov_root,
+                    "sampling",
+                    config.benchmark_seconds,
+                    start.elapsed(),
+                    round,
+                    builder.analyzed_traces(),
+                    builder.empty_traces(),
+                    builder.invalid_traces(),
+                    parameter_spent,
+                    parameter_budget,
+                    parameter_skips,
+                    Some("stack restarted after benchmark execution failure"),
+                );
                 continue;
             }
         };
@@ -1568,15 +1679,32 @@ fn build_benchmark_model_live(
 
         if Instant::now() >= next_log {
             println!(
-                "benchmark: elapsed={}s rounds={} analyzed={} empty={} invalid={}",
+                "benchmark: elapsed={}s rounds={} analyzed={} empty={} invalid={} param_spent={}s/{}s param_skips={}",
                 start.elapsed().as_secs(),
                 round,
                 builder.analyzed_traces(),
                 builder.empty_traces(),
-                builder.invalid_traces()
+                builder.invalid_traces(),
+                parameter_spent.as_secs(),
+                parameter_budget.as_secs(),
+                parameter_skips,
             );
             next_log = Instant::now() + Duration::from_secs(30);
         }
+        write_benchmark_status(
+            lcov_root,
+            "sampling",
+            config.benchmark_seconds,
+            start.elapsed(),
+            round,
+            builder.analyzed_traces(),
+            builder.empty_traces(),
+            builder.invalid_traces(),
+            parameter_spent,
+            parameter_budget,
+            parameter_skips,
+            Some("sampling"),
+        );
     }
 
     if builder.analyzed_traces() == 0 {
@@ -1592,11 +1720,127 @@ fn build_benchmark_model_live(
         model.edge_count(),
         model.distinct_callbacks()
     );
+    write_benchmark_status(
+        lcov_root,
+        "complete",
+        config.benchmark_seconds,
+        start.elapsed(),
+        round,
+        builder.analyzed_traces(),
+        builder.empty_traces(),
+        builder.invalid_traces(),
+        parameter_spent,
+        parameter_budget,
+        parameter_skips,
+        Some("benchmark sampling complete"),
+    );
+    write_benchmark_summary(
+        lcov_root,
+        "live-sampling",
+        config.benchmark_seconds,
+        start.elapsed(),
+        round,
+        builder.analyzed_traces(),
+        builder.empty_traces(),
+        builder.invalid_traces(),
+        parameter_spent,
+        parameter_budget,
+        parameter_skips,
+        model.edge_count(),
+        model.distinct_callbacks(),
+    );
     if let Some(path) = &config.benchmark_model {
         model.save_json(path)?;
         println!("benchmark: saved model to {}", path.display());
     }
     Ok((model, round))
+}
+
+fn write_json_report(path: &Path, value: serde_json::Value) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(bytes) = serde_json::to_vec_pretty(&value) {
+        let _ = fs::write(path, bytes);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_benchmark_status(
+    lcov_root: Option<&Path>,
+    phase: &str,
+    configured_seconds: u64,
+    elapsed: Duration,
+    round: u64,
+    analyzed_traces: u64,
+    empty_traces: u64,
+    invalid_traces: u64,
+    parameter_spent: Duration,
+    parameter_budget: Duration,
+    parameter_skips: u64,
+    note: Option<&str>,
+) {
+    let Some(lcov_root) = lcov_root else {
+        return;
+    };
+    let elapsed_secs = elapsed.as_secs();
+    let remaining_secs = configured_seconds.saturating_sub(elapsed_secs);
+    write_json_report(
+        &lcov_root.join("benchmark/status.json"),
+        json!({
+            "phase": phase,
+            "configured_seconds": configured_seconds,
+            "elapsed_seconds": elapsed_secs,
+            "remaining_seconds": remaining_secs,
+            "round": round,
+            "analyzed_traces": analyzed_traces,
+            "empty_traces": empty_traces,
+            "invalid_traces": invalid_traces,
+            "parameter_spent_seconds": parameter_spent.as_secs(),
+            "parameter_budget_seconds": parameter_budget.as_secs(),
+            "parameter_skips": parameter_skips,
+            "note": note,
+        }),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn write_benchmark_summary(
+    lcov_root: Option<&Path>,
+    source: &str,
+    configured_seconds: u64,
+    elapsed: Duration,
+    rounds: u64,
+    analyzed_traces: u64,
+    empty_traces: u64,
+    invalid_traces: u64,
+    parameter_spent: Duration,
+    parameter_budget: Duration,
+    parameter_skips: u64,
+    edge_count: usize,
+    distinct_callbacks: usize,
+) {
+    let Some(lcov_root) = lcov_root else {
+        return;
+    };
+    write_json_report(
+        &lcov_root.join("benchmark/summary.json"),
+        json!({
+            "phase": "complete",
+            "source": source,
+            "configured_seconds": configured_seconds,
+            "elapsed_seconds": elapsed.as_secs(),
+            "rounds": rounds,
+            "analyzed_traces": analyzed_traces,
+            "empty_traces": empty_traces,
+            "invalid_traces": invalid_traces,
+            "parameter_spent_seconds": parameter_spent.as_secs(),
+            "parameter_budget_seconds": parameter_budget.as_secs(),
+            "parameter_skips": parameter_skips,
+            "callback_graph_edges": edge_count,
+            "distinct_callbacks": distinct_callbacks,
+        }),
+    );
 }
 
 /// gcov 计数只在进程退出或 __gcov_dump() 时落盘；tracer 在 COVERAGE_RUN
@@ -1953,6 +2197,20 @@ fn main() {
     ) {
         Ok(result) => result,
         Err(message) => {
+            write_benchmark_status(
+                config.lcov_dir.as_deref(),
+                "failed",
+                config.benchmark_seconds,
+                Duration::ZERO,
+                0,
+                0,
+                0,
+                0,
+                Duration::ZERO,
+                Duration::from_secs(config.benchmark_parameter_budget_seconds),
+                0,
+                Some(&message),
+            );
             eprintln!("nav2_costmap_e2e: benchmark failed: {message}");
             terminate_stack_process_group(&mut stack);
             let _ = fs::remove_file(&shm_path);
@@ -2021,8 +2279,10 @@ fn main() {
             continue;
         };
         let marker_round = benchmark_rounds + round;
+        let round_label = format!("round {round}");
         let execution = match execute_payload_round(
             round,
+            &round_label,
             marker_round,
             &payload,
             binding,
