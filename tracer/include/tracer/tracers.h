@@ -16,8 +16,8 @@ std::uint64_t now_ns() noexcept;
 // instrumentation calls this once from the RCL layer initialization; the
 // paper puts the shared memory initialization tracer at that layer.
 void init(const char* shm_name);
-void init(const char* shm_name, std::uint64_t registration_capacity,
-          std::uint64_t runtime_capacity);
+void init(const char* shm_name, std::uint64_t reg_capacity,
+          std::uint64_t rt_capacity);
 
 // Attaches to an already-initialized shared memory object without
 // reinitializing it. Used by separate writer processes (e.g. the round

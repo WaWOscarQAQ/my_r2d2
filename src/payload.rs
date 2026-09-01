@@ -27,7 +27,6 @@ pub enum Value {
     F32(f32),
     F64(f64),
     String(String),
-    Bytes(Vec<u8>),
 }
 
 /// A structured value tree mirroring `TypeNode` node for node.
@@ -102,8 +101,8 @@ impl std::error::Error for Error {}
 /// serialization is available.
 ///
 /// Layout: bool is one byte; integers are little-endian fixed width;
-/// `f32`/`f64` are little-endian bit patterns; strings and byte sequences
-/// are a `u32` little-endian length followed by the payload; arrays are a
+/// `f32`/`f64` are little-endian bit patterns; strings are a `u32`
+/// little-endian length followed by UTF-8 bytes; arrays are a
 /// `u32` little-endian element count followed by the elements; nested
 /// messages are their fields in order without framing, because the shape
 /// is recovered from the type tree during deserialization.
@@ -170,10 +169,6 @@ fn encode(value: &ValueTree, ty: &TypeNode, out: &mut Vec<u8>) -> Result<(), Err
             push_len(s.len(), out)?;
             out.extend_from_slice(s.as_bytes());
         }
-        (ValueTree::Leaf(Value::Bytes(b)), TypeNode::Primitive(Primitive::Bytes)) => {
-            push_len(b.len(), out)?;
-            out.extend_from_slice(b);
-        }
         (ValueTree::Nested(values), TypeNode::Nested(fields)) => {
             if values.len() != fields.len() {
                 return Err(Error::TypeMismatch {
@@ -227,11 +222,6 @@ fn decode(cursor: &mut &[u8], ty: &TypeNode) -> Result<ValueTree, Error> {
             let text = String::from_utf8(bytes)
                 .map_err(|_| Error::Malformed("string is not valid UTF-8".to_string()))?;
             Ok(ValueTree::Leaf(Value::String(text)))
-        }
-        TypeNode::Primitive(Primitive::Bytes) => {
-            let len = read_len(cursor)?;
-            let bytes = take(cursor, len)?.to_vec();
-            Ok(ValueTree::Leaf(Value::Bytes(bytes)))
         }
         TypeNode::Constrained(inner, constraint) => {
             let value = decode(cursor, inner)?;
@@ -311,7 +301,7 @@ fn numeric_width(primitive: Primitive) -> usize {
         Primitive::I16 | Primitive::U16 => 2,
         Primitive::I32 | Primitive::U32 | Primitive::F32 => 4,
         Primitive::I64 | Primitive::U64 | Primitive::F64 => 8,
-        Primitive::Bool | Primitive::String | Primitive::Bytes => unreachable!(),
+        Primitive::Bool | Primitive::String => unreachable!(),
     }
 }
 
@@ -334,7 +324,7 @@ fn decode_numeric(primitive: Primitive, bytes: &[u8]) -> Result<ValueTree, Error
             array(bytes)[..4].try_into().unwrap(),
         ))),
         Primitive::F64 => Value::F64(f64::from_bits(u64::from_le_bytes(array(bytes)))),
-        Primitive::Bool | Primitive::String | Primitive::Bytes => unreachable!(),
+        Primitive::Bool | Primitive::String => unreachable!(),
     };
     Ok(ValueTree::Leaf(value))
 }

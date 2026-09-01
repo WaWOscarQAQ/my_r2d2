@@ -5,7 +5,7 @@
 //! inputs. Mutation is conducted recursively based on data files from the
 //! interface specification, so each field carries a recursive type tree.
 //!
-//! The `FileExtractor` implementation parses real `.msg` and `.srv` files;
+//! The `FileExtractor` implementation parses real `.msg`, `.srv`, and `.action` files;
 //! ROS graph discovery is still a separate integration layer.
 
 use std::collections::HashSet;
@@ -15,13 +15,23 @@ use std::path::{Path, PathBuf};
 
 /// The kind of ROS interface that can carry a fuzzing payload.
 ///
-/// Topics, services, and parameter writes are in scope; actions are
-/// intentionally excluded per the reproduction contract.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
     Topic,
     Service,
+    Action,
     Parameter,
+}
+
+impl Kind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Topic => "topic",
+            Self::Service => "service",
+            Self::Action => "action",
+            Self::Parameter => "parameter",
+        }
+    }
 }
 
 /// ROS primitive value kinds.
@@ -40,8 +50,6 @@ pub enum Primitive {
     F64,
     /// Variable-length UTF-8 string.
     String,
-    /// Variable-length byte sequence (`uint8[]`).
-    Bytes,
 }
 
 /// One field in a message or service shape.
@@ -288,7 +296,7 @@ pub trait Extractor {
     fn extract(&self) -> Result<Vec<Interface>, Error>;
 }
 
-/// Extracts ROS 2 interfaces directly from real `.msg` and `.srv` files.
+/// Extracts ROS 2 interfaces directly from real `.msg`, `.srv`, and `.action` files.
 ///
 /// `search_paths` should contain directories that contain ROS packages, for
 /// example an install/share directory. The files passed to `new` are the
@@ -398,13 +406,20 @@ impl Parser<'_> {
                 (members.fields, Vec::new(), members.constants)
             }
 
+            Some("action") => {
+                let goal = split_action_goal(&source)?;
+                let members = self.parse_members(&goal, &path, &package, &mut data_files)?;
+                (members.fields, Vec::new(), members.constants)
+            }
+
             _ => {
-                let msg = format!("{} is not a .msg or .srv file", path.display());
+                let msg = format!("{} is not a .msg, .srv, or .action file", path.display());
                 return Err(Error::new(msg));
             }
         };
 
         let is_service = extension == Some("srv");
+        let is_action = extension == Some("action");
 
         let name_str = path.display().to_string();
         let self_file = DataFile::new(name_str, source).with_constants(constants);
@@ -412,6 +427,8 @@ impl Parser<'_> {
 
         let kind = if is_service {
             Kind::Service
+        } else if is_action {
+            Kind::Action
         } else {
             Kind::Topic
         };
@@ -566,18 +583,52 @@ fn package_name(path: &Path) -> Result<String, Error> {
 }
 
 fn split_service(source: &str) -> Result<(String, String), Error> {
-    let mut sections = source.split("\n---\n");
-    let request = sections.next().unwrap_or_default().to_string();
-    let response = sections
-        .next()
-        .ok_or_else(|| Error::new("service file must contain a line containing only ---"))?
-        .to_string();
-    if sections.next().is_some() {
+    let sections = split_interface_sections(source);
+    if sections.len() < 2 {
+        return Err(Error::new(
+            "service file must contain a line containing only ---",
+        ));
+    }
+    if sections.len() > 2 {
         return Err(Error::new(
             "service file contains more than one --- separator",
         ));
     }
-    Ok((request, response))
+    Ok((sections[0].clone(), sections[1].clone()))
+}
+
+fn split_action_goal(source: &str) -> Result<String, Error> {
+    let sections = split_interface_sections(source);
+    if sections.len() < 2 {
+        return Err(Error::new(
+            "action file must contain result and feedback separators",
+        ));
+    }
+    if sections.len() < 3 {
+        return Err(Error::new("action file must contain feedback separator"));
+    }
+    if sections.len() > 3 {
+        return Err(Error::new(
+            "action file contains more than two --- separators",
+        ));
+    }
+    Ok(sections[0].clone())
+}
+
+fn split_interface_sections(source: &str) -> Vec<String> {
+    let mut sections = vec![String::new()];
+    for line in source.lines() {
+        if line.trim() == "---" {
+            sections.push(String::new());
+            continue;
+        }
+        let section = sections.last_mut().expect("at least one interface section");
+        if !section.is_empty() {
+            section.push('\n');
+        }
+        section.push_str(line);
+    }
+    sections
 }
 
 struct ParsedMemberLine<'a> {
@@ -813,9 +864,9 @@ fn parse_scalar_literal(
         ))
     };
     Ok(match primitive {
-        Primitive::Bool => Literal::Bool(match raw {
-            "true" => true,
-            "false" => false,
+        Primitive::Bool => Literal::Bool(match raw.to_ascii_lowercase().as_str() {
+            "true" | "1" => true,
+            "false" | "0" => false,
             _ => return Err(parse_err("bool")),
         }),
         Primitive::I8 => Literal::I8(raw.parse::<i8>().map_err(|_| parse_err("int8"))?),
@@ -837,9 +888,6 @@ fn parse_scalar_literal(
                 .to_bits(),
         ),
         Primitive::String => Literal::String(parse_string_literal(raw, owner, line_no)?),
-        Primitive::Bytes => {
-            return Err(parse_err("byte sequence"));
-        }
     })
 }
 
@@ -1072,5 +1120,23 @@ fn validate_literal_constraint(
             )))
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::{split_action_goal, split_service};
+
+    #[test]
+    fn service_separator_supports_empty_request_and_response() {
+        assert_eq!(
+            split_service("---\n").unwrap(),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn action_separators_support_empty_sections() {
+        assert_eq!(split_action_goal("---\n---\n").unwrap(), String::new());
     }
 }

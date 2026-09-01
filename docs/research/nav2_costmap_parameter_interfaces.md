@@ -153,6 +153,12 @@ ROS 2 CLI `ros2 param set` 最终也是走这条参数服务链路，不是 topi
 - `PluginContainerLayer` 虽然有动态参数回调，但当前 `costmap_params.yaml` 没启用它。
 - `StaticLayer` 里被显式拒绝动态修改的参数不能当成有效 fuzz 输入面。
 - 当前 live 目标没有 action server，所以这轮仍然只补 parameter，不补 action。
+- 2026-09-01 full-stack run 里，`/local_costmap/local_costmap` 和
+  `/global_costmap/global_costmap` 的 `footprint_padding` 参数在 benchmark 阶段
+  触发 parameter set timeout / stack unhealthy；它走
+  `Costmap2DROS::updateParametersCallback()` 的 `_dynamic_parameter_mutex` 路径，
+  与已复现的 costmap 动态参数锁顺序问题重合。因此它现在只保留为独立
+  bug reproduction 输入，不进入默认 safe parameter profile。
 
 ## 3. 这次实现采用的边界
 
@@ -162,12 +168,21 @@ ROS 2 CLI `ros2 param set` 最终也是走这条参数服务链路，不是 topi
 
 1. 参数集合来自两部分交集：
    - `nav2_costmap_2d` 源码里真实存在的动态参数回调
-   - 当前 `nav2_ws/costmap_params.yaml` 对应的 `/costmap` 配置和插件启用情况
-2. 对于源码声明了默认值、但 YAML 没显式写出的动态参数，恢复值取源码默认值。
+   - live `/costmap` 当前通过 `ros2 param list` 真正声明出来的参数名
+2. 恢复值优先取 live `/costmap` 的 `ros2 param dump` 当前值；拿不到时才回退到
+   `nav2_ws/costmap_params.yaml` 或源码默认值。
 3. 参数 payload 统一建成单字段接口：顶层只有一个 `value` 字段，字段类型对应 ROS parameter value 类型。
 4. sender 通过 `ros2 param set` 走真实参数服务链路，不走 mock，不走自定义 side channel。
 
 这意味着本轮实现是“当前 `/costmap` 目标可真实执行的参数输入面”，不是“对所有 ROS 节点自动枚举所有 parameter”的最终版。
+
+补充口径：
+
+- 当前合并路线中，safe parameter profile 与 topic/service/action 一起进入同一个
+  live binding 集合；benchmark 与 fuzz phase 使用同一输入面建立/比较
+  callback-trace reference。
+- parameter 轮会在采样后恢复默认值，并丢弃恢复期 trace；如果 restore 失败，
+  harness 会把本轮判为 stack unhealthy，重启真实 stack，再继续下一轮。
 
 ## 4. 为什么 sender 必须同时负责 restore
 

@@ -12,38 +12,6 @@ pub enum TraceDisposition {
     Invalid,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OracleMode {
-    PaperSupported,
-    JazzyReproduction,
-}
-
-impl OracleMode {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::PaperSupported => "paper-supported",
-            Self::JazzyReproduction => "jazzy-reproduction",
-        }
-    }
-
-    pub fn parse_cli(value: &str) -> Result<Self, String> {
-        match value {
-            "paper-supported" => Ok(Self::PaperSupported),
-            "jazzy-reproduction" => Ok(Self::JazzyReproduction),
-            other => Err(format!(
-                "unknown oracle mode {other}; expected paper-supported or jazzy-reproduction"
-            )),
-        }
-    }
-
-    fn selects_new_state(self, evidence: StateEvidence) -> bool {
-        match self {
-            Self::PaperSupported => evidence.paper_supported_new_state(),
-            Self::JazzyReproduction => evidence.jazzy_reproduction_new_state(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct StateEvidence {
     pub new_edge: bool,
@@ -58,11 +26,7 @@ impl StateEvidence {
         self.new_edge || self.new_callback || self.new_message
     }
 
-    pub fn paper_supported_new_state(self) -> bool {
-        self.new_edge
-    }
-
-    pub fn jazzy_reproduction_new_state(self) -> bool {
+    pub fn callback_trace_new_state(self) -> bool {
         self.structural_novelty() || self.latency_deviation || self.throughput_deviation
     }
 }
@@ -70,8 +34,6 @@ impl StateEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OracleVerdict {
     pub new_state: bool,
-    pub paper_supported_new_state: bool,
-    pub jazzy_reproduction_new_state: bool,
     pub crashed: bool,
     pub trace: TraceDisposition,
     pub evidence: StateEvidence,
@@ -428,38 +390,22 @@ pub struct BenchmarkStateOracle {
     benchmark: BenchmarkModel,
     global_state: GlobalState,
     thresholds: DeviationThresholds,
-    mode: OracleMode,
     last_verdict: OracleVerdict,
 }
 
 impl BenchmarkStateOracle {
     pub fn new(model: BenchmarkModel, thresholds: DeviationThresholds) -> Self {
-        Self::with_mode(model, thresholds, OracleMode::JazzyReproduction)
-    }
-
-    pub fn with_mode(
-        model: BenchmarkModel,
-        thresholds: DeviationThresholds,
-        mode: OracleMode,
-    ) -> Self {
         Self {
             global_state: GlobalState::from_benchmark(&model),
             benchmark: model,
             thresholds,
-            mode,
             last_verdict: OracleVerdict {
                 new_state: false,
-                paper_supported_new_state: false,
-                jazzy_reproduction_new_state: false,
                 crashed: false,
                 trace: TraceDisposition::Empty,
                 evidence: StateEvidence::default(),
             },
         }
-    }
-
-    pub fn mode(&self) -> OracleMode {
-        self.mode
     }
 
     pub fn evaluate(&mut self, trace: &CallbackTrace, crashed: bool) -> OracleVerdict {
@@ -477,13 +423,9 @@ impl BenchmarkStateOracle {
         } else {
             StateEvidence::default()
         };
-        let paper_supported_new_state = evidence.paper_supported_new_state();
-        let jazzy_reproduction_new_state = evidence.jazzy_reproduction_new_state();
-        let new_state = self.mode.selects_new_state(evidence);
+        let new_state = evidence.callback_trace_new_state();
         self.last_verdict = OracleVerdict {
             new_state,
-            paper_supported_new_state,
-            jazzy_reproduction_new_state,
             crashed,
             trace: disposition,
             evidence,
@@ -506,7 +448,7 @@ impl BenchmarkStateOracle {
     fn analyze(&mut self, trace: &CallbackTrace) -> StateEvidence {
         let aggregate = aggregate_trace(trace);
         let evidence = self.detect_evidence(&aggregate);
-        if self.mode.selects_new_state(evidence) {
+        if evidence.callback_trace_new_state() {
             self.global_state.update_from_aggregate(&aggregate);
         }
         evidence
@@ -592,7 +534,7 @@ impl StateOracle for BenchmarkStateOracle {
 mod tests {
     use super::{
         BenchmarkBuilder, BenchmarkModel, BenchmarkStateOracle, CallbackBenchmark,
-        DeviationThresholds, MessageBenchmark, OracleMode, TraceDisposition,
+        DeviationThresholds, MessageBenchmark, TraceDisposition,
     };
     use crate::callback_profile::{CallbackLatency, CallbackTrace, MessageLatency};
     use crate::payload_generator::StateOracle;
@@ -715,8 +657,6 @@ mod tests {
 
         let verdict = oracle.evaluate(&uniform_trace(&[1, 2], 25, 4.0), false);
         assert!(verdict.new_state);
-        assert!(!verdict.paper_supported_new_state);
-        assert!(verdict.jazzy_reproduction_new_state);
         assert!(verdict.evidence.latency_deviation);
         assert!(verdict.evidence.throughput_deviation);
         assert!(!verdict.evidence.new_edge);
@@ -727,8 +667,6 @@ mod tests {
         let mut oracle = BenchmarkStateOracle::new(model, thresholds);
         let verdict = oracle.evaluate(&uniform_trace(&[2, 3], 10, 10.0), false);
         assert!(verdict.new_state);
-        assert!(verdict.paper_supported_new_state);
-        assert!(verdict.jazzy_reproduction_new_state);
         assert!(verdict.evidence.new_edge);
         assert_eq!(verdict.trace, TraceDisposition::Analyzed);
     }
@@ -787,8 +725,6 @@ mod tests {
 
         let verdict = oracle.evaluate(&trace(&[(1, 10, Some(15))], &[]), false);
         assert!(verdict.new_state);
-        assert!(!verdict.paper_supported_new_state);
-        assert!(verdict.jazzy_reproduction_new_state);
         assert!(verdict.evidence.latency_deviation);
         assert_eq!(verdict.trace, TraceDisposition::Analyzed);
     }
@@ -804,14 +740,12 @@ mod tests {
 
         let verdict = oracle.evaluate(&invalid, true);
         assert!(!verdict.new_state);
-        assert!(!verdict.paper_supported_new_state);
-        assert!(!verdict.jazzy_reproduction_new_state);
         assert_eq!(verdict.trace, TraceDisposition::Invalid);
         assert!(oracle.crashed());
     }
 
     #[test]
-    fn paper_supported_mode_ignores_threshold_only_candidates() {
+    fn threshold_only_candidates_count_in_unified_callback_trace_oracle() {
         let mut callback_latency = BTreeMap::new();
         callback_latency.insert(
             1,
@@ -828,23 +762,16 @@ mod tests {
             message_throughput: BTreeMap::new(),
             analyzed_traces: 5,
         };
-        let mut oracle = BenchmarkStateOracle::with_mode(
-            model,
-            DeviationThresholds::new(2.0, 0.5),
-            OracleMode::PaperSupported,
-        );
+        let mut oracle = BenchmarkStateOracle::new(model, DeviationThresholds::new(2.0, 0.5));
 
         let verdict = oracle.evaluate(&trace(&[(1, 25, None)], &[]), false);
-        assert_eq!(oracle.mode(), OracleMode::PaperSupported);
-        assert!(!verdict.new_state);
-        assert!(!verdict.paper_supported_new_state);
-        assert!(verdict.jazzy_reproduction_new_state);
+        assert!(verdict.new_state);
         assert!(verdict.evidence.latency_deviation);
         assert_eq!(verdict.trace, TraceDisposition::Analyzed);
     }
 
     #[test]
-    fn paper_supported_mode_still_accepts_new_edges() {
+    fn unified_callback_trace_oracle_accepts_new_edges() {
         let mut graph_edges = BTreeSet::new();
         graph_edges.insert((1, 2));
         let model = BenchmarkModel {
@@ -853,16 +780,10 @@ mod tests {
             message_throughput: BTreeMap::new(),
             analyzed_traces: 5,
         };
-        let mut oracle = BenchmarkStateOracle::with_mode(
-            model,
-            DeviationThresholds::new(2.0, 0.5),
-            OracleMode::PaperSupported,
-        );
+        let mut oracle = BenchmarkStateOracle::new(model, DeviationThresholds::new(2.0, 0.5));
 
         let verdict = oracle.evaluate(&uniform_trace(&[2, 3], 10, 10.0), false);
         assert!(verdict.new_state);
-        assert!(verdict.paper_supported_new_state);
-        assert!(verdict.jazzy_reproduction_new_state);
         assert!(verdict.evidence.new_edge);
     }
 }

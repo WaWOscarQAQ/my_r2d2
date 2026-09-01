@@ -75,7 +75,7 @@ fn round_trips_every_numeric_primitive() {
 }
 
 #[test]
-fn round_trips_string_and_bytes_with_length_prefix() {
+fn round_trips_string_with_length_prefix() {
     let value = leaf(Value::String("laser_frame".to_string()));
     let ty: TypeNode = Primitive::String.into();
     let bytes = SimpleSerializer.serialize(&value, &ty).unwrap();
@@ -85,13 +85,6 @@ fn round_trips_string_and_bytes_with_length_prefix() {
     assert_eq!(
         round_trip(&value, &ty),
         leaf(Value::String("laser_frame".to_string()))
-    );
-
-    let value = leaf(Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
-    let ty: TypeNode = Primitive::Bytes.into();
-    assert_eq!(
-        round_trip(&value, &ty),
-        leaf(Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]))
     );
 }
 
@@ -109,7 +102,6 @@ fn round_trips_bounded_string_and_array_values() {
 fn value_len(value: &ValueTree) -> u32 {
     match value {
         ValueTree::Leaf(Value::String(s)) => s.len() as u32,
-        ValueTree::Leaf(Value::Bytes(b)) => b.len() as u32,
         other => panic!("not a length-prefixed leaf: {other:?}"),
     }
 }

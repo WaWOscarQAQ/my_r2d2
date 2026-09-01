@@ -9,13 +9,20 @@
 //! * namespace 按论文 §4.1.1 作为注册属性采集并存入 `CallbackInfo`，但
 //!   按 Figure 5 不参与 ID；同一 (name, type) 跨 namespace 出现时计为
 //!   `callback_id_collisions` 并使 trace 失去状态反馈资格。
+//! * ROS 2/Nav2 会在生命周期切换和动态 BT action 执行中重用 handler
+//!   地址。handler 只是运行期关联，不属于论文 Figure 5 的 callback ID；
+//!   因此冲突采用 latest-registration-wins，保留诊断计数但不永久作废后续
+//!   trace。
 //! * scheduling latency 在 invoke 缺失时为 unknown；execution latency 仍按
 //!   论文的 start/end 计算。invoke 缺失单独计为 `missing_invokes`，其本身
-//!   不取消 trace 的状态反馈资格（当前 live 路径的 runtime interposer
-//!   预期会提供 `executor_execute`；该分支保留给降级采集或历史 app-hook
-//!   trace）；真正的记录丢失由 `lossy`（drain 的 missed 计数）拦截。
+//!   不取消 trace 的状态反馈资格；drain 边界残留的未配对 runtime 事件也只
+//!   作为诊断保留。真正的记录丢失由 `lossy`（drain 的 missed 计数）拦截。
 //! * throughput 单位为 bytes/ns；`sub <= pub` 时不生成度量并记录异常。
+//! * `rcl_take` 可能覆盖 ROS/DDS 内部或隐藏订阅。未知的 take 只作为诊断
+//!   噪声保留；已知 take 仍会生成 `msg_trace`，且不会因为未知 take 把整轮
+//!   benchmark 丢弃。
 
+use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
 use crate::trace_buffer::{
@@ -24,7 +31,7 @@ use crate::trace_buffer::{
 };
 
 /// 一个回调的静态档案（论文 Figure 5 的 `CallbackInfo`）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CallbackInfo {
     /// `Hash(callback name, callback type)`。
     pub id: u64,
@@ -37,7 +44,7 @@ pub struct CallbackInfo {
 }
 
 /// 一次回调执行的延迟（论文 Figure 5 的 `Callback Latency`）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct CallbackLatency {
     pub callback_id: u64,
     /// `end - start`。
@@ -47,7 +54,7 @@ pub struct CallbackLatency {
 }
 
 /// 一条消息的吞吐（论文 Figure 5 的 `Message Latency`）。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MessageLatency {
     pub callback_id: u64,
     /// `buffer size / (sub - pub)`，当前 reproduction choice 为 bytes/ns。
@@ -55,7 +62,7 @@ pub struct MessageLatency {
 }
 
 /// 不能静默混入论文 §4.2.1 状态判定的数据质量计数。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct TraceDiagnostics {
     pub registration_records_missed: u64,
     pub runtime_records_missed: u64,
@@ -68,18 +75,28 @@ pub struct TraceDiagnostics {
     /// 数据歧义，trace 失去状态反馈资格（不改变论文公式本身的保守防护）。
     pub callback_id_collisions: u64,
     pub invalid_timestamp_order: u64,
-    /// start 没有对应 invoke 的次数。当前 live 路径预期由 runtime
-    /// interposer 提供 `executor_execute`；缺失通常意味着降级采集、
-    /// 历史 app-hook trace 或局部记录缺口，因此单独计数、不直接取消
-    /// 状态分析资格。
+    /// start 没有对应 invoke 的次数。缺失通常意味着官方 trace
+    /// 相关性不完整或局部记录缺口，因此单独计数、不直接取消状态分析资格。
     pub missing_invokes: u64,
     pub unmatched_runtime_events: u64,
+    /// 所有未知 handler 事件的总数，包括 callback/executor 事件和 rcl_take。
     pub unknown_handlers: u64,
+    /// 未能映射到完整 CallbackInfo 的 rcl_take 数量。该类事件常来自内部
+    /// ROS/DDS 订阅，不能生成 message metric，但不污染已知 callback 状态。
+    pub unknown_rcl_take_handlers: u64,
+    pub executor_execute_events: u64,
+    pub known_executor_execute_handlers: u64,
+    pub callback_start_events: u64,
+    pub known_callback_start_handlers: u64,
+    pub callback_end_events: u64,
+    pub known_callback_end_handlers: u64,
+    pub rcl_take_events: u64,
+    pub known_rcl_take_handlers: u64,
     pub invalid_message_durations: u64,
 }
 
 /// 一次测试的完整 trace profile（论文 Figure 5 的 `Callback Trace`）。
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize)]
 pub struct CallbackTrace {
     pub call_trace: Vec<CallbackLatency>,
     pub msg_trace: Vec<MessageLatency>,
@@ -89,17 +106,15 @@ pub struct CallbackTrace {
 }
 
 impl CallbackTrace {
-    /// 只有完整、无歧义的 trace 才能进入论文 §4.2.1 的全局状态更新。
+    /// 只有本轮实际使用到的 handler 完整、且 runtime 无歧义的 trace 才能进入
+    /// 论文 §4.2.1 的全局状态更新。未参与本轮的残缺注册仅作为诊断信息保留。
     pub fn valid_for_state_analysis(&self) -> bool {
         !self.lossy
-            && self.diagnostics.incomplete_registrations == 0
-            && self.diagnostics.registration_conflicts == 0
             && self.diagnostics.truncated_callback_names == 0
             && self.diagnostics.truncated_callback_namespaces == 0
             && self.diagnostics.callback_id_collisions == 0
             && self.diagnostics.invalid_timestamp_order == 0
-            && self.diagnostics.unmatched_runtime_events == 0
-            && self.diagnostics.unknown_handlers == 0
+            && self.diagnostics.unknown_handlers == self.diagnostics.unknown_rcl_take_handlers
             && self.diagnostics.invalid_message_durations == 0
     }
 }
@@ -122,7 +137,8 @@ impl CallbackRegistry {
         Self::default()
     }
 
-    /// 累积一次实时 drain。冲突条目采用 first-wins，并显式使 profile 失效。
+    /// 累积一次实时 drain。handler 地址重用采用 latest-registration-wins；
+    /// 冲突仍保留为诊断，但不永久污染后续反馈。
     pub fn ingest(&mut self, drain: &RegistrationDrain) {
         self.registration_records_missed = self
             .registration_records_missed
@@ -211,6 +227,7 @@ impl CallbackRegistry {
                         Some(existing) if existing != &incoming => {
                             self.registration_conflicts =
                                 self.registration_conflicts.saturating_add(1);
+                            self.names.insert(event.rcl_handler, incoming);
                         }
                         Some(_) => {}
                         None => {
@@ -224,6 +241,7 @@ impl CallbackRegistry {
                         Some(existing) if *existing != incoming => {
                             self.registration_conflicts =
                                 self.registration_conflicts.saturating_add(1);
+                            self.rclcpp.insert(event.rcl_handler, incoming);
                         }
                         Some(_) => {}
                         None => {
@@ -292,11 +310,10 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
 
     for event in &runtime.events {
         match event.event_type {
-            // 轮次分界标记只是分段框架，不是回调事件；由调用方在分段时
-            // 消费，这里直接跳过，不计入任何诊断。
-            RuntimeEventType::RoundBoundary => {}
             RuntimeEventType::ExecutorExecute => {
+                trace.diagnostics.executor_execute_events += 1;
                 if rclcpp_to_id.contains_key(&event.rclcpp_handler) {
+                    trace.diagnostics.known_executor_execute_handlers += 1;
                     pending_invoke
                         .entry(event.rclcpp_handler)
                         .or_default()
@@ -306,10 +323,12 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
                 }
             }
             RuntimeEventType::CallbackStart => {
+                trace.diagnostics.callback_start_events += 1;
                 let Some(&id) = rclcpp_to_id.get(&event.rclcpp_handler) else {
                     trace.diagnostics.unknown_handlers += 1;
                     continue;
                 };
+                trace.diagnostics.known_callback_start_handlers += 1;
                 let invoke = pending_invoke
                     .get_mut(&event.rclcpp_handler)
                     .and_then(|stack| stack.pop());
@@ -332,6 +351,10 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
                     .push((event.timestamp, scheduling_latency, id));
             }
             RuntimeEventType::CallbackEnd => {
+                trace.diagnostics.callback_end_events += 1;
+                if rclcpp_to_id.contains_key(&event.rclcpp_handler) {
+                    trace.diagnostics.known_callback_end_handlers += 1;
+                }
                 let start = pending_start
                     .get_mut(&event.rclcpp_handler)
                     .and_then(|stack| stack.pop());
@@ -351,10 +374,13 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
                 }
             }
             RuntimeEventType::RclTake => {
+                trace.diagnostics.rcl_take_events += 1;
                 let Some(&id) = rcl_to_id.get(&event.rcl_handler) else {
                     trace.diagnostics.unknown_handlers += 1;
+                    trace.diagnostics.unknown_rcl_take_handlers += 1;
                     continue;
                 };
+                trace.diagnostics.known_rcl_take_handlers += 1;
                 if let Some(duration) = event.sub_timestamp.checked_sub(event.pub_timestamp) {
                     if duration > 0 {
                         trace.msg_trace.push(MessageLatency {
@@ -368,6 +394,7 @@ pub fn profile_trace(registry: &CallbackRegistry, runtime: &RuntimeDrain) -> Cal
                     trace.diagnostics.invalid_message_durations += 1;
                 }
             }
+            RuntimeEventType::RoundBoundary => {}
         }
     }
 

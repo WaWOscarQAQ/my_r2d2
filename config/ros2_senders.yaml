@@ -1,0 +1,54 @@
+version: 1
+
+# Fixed command tokens and runtime parameter order live here. `{{name}}`
+# inserts one argv value and `{{name...}}` expands a list of argv values.
+# Rust supplies only the named values, so quoting and payload contents are kept.
+scan_bridge:
+  executable: bash
+  args:
+    - -c
+    - >-
+      source "$1" && source "$2" && export ROS_DOMAIN_ID="$3" && export ROS_LOG_DIR="${ROS_LOG_DIR:-/tmp/r2d2_ros_logs}" && export ROS2CLI_NO_DAEMON=1 && mkdir -p "$ROS_LOG_DIR" && if [ "${R2D2_PROFILE:-}" = "sancov" ] && [ -z "${R2D2_TSAN_LD_PRELOAD:-}" ]; then export LD_LIBRARY_PATH="$(printf '%s' "${LD_LIBRARY_PATH:-}" | tr ':' '\n' | grep -v '/overlay_ws/install_sancov/' | paste -sd: -)"; fi && if [ -n "${R2D2_TSAN_LD_PRELOAD:-}" ]; then exec setarch x86_64 -R env LD_PRELOAD="$R2D2_TSAN_LD_PRELOAD" ros2 run r2d2_scan_bridge r2d2_scan_bridge "$4" "$5" "$6" "$7" "$8" "$9" "${10}"; else exec setarch x86_64 -R ros2 run r2d2_scan_bridge r2d2_scan_bridge "$4" "$5" "$6" "$7" "$8" "$9" "${10}"; fi
+    - r2d2-ros2-sender
+    - "{{ros_setup}}"
+    - "{{install_setup}}"
+    - "{{domain_id}}"
+    - "{{payload_file}}"
+    - "{{rate_hz}}"
+    - "{{duration_sec}}"
+    - "{{burst_count}}"
+    - "{{burst_gap_ms}}"
+    - "{{max_publishes}}"
+    - "{{stamp_mode}}"
+
+ros2_cli:
+  executable: bash
+  args:
+    - -lc
+    - >-
+      strip_r2d2_sancov_paths() { printf '%s' "$1" | tr ':' '\n' | grep -v '/overlay_ws/install_sancov/' | grep -v '/nav2_ws/install_sancov/' | paste -sd: -; }; source "$1" && if [ "${R2D2_PROFILE:-}" = "sancov" ] && [ -z "${R2D2_TSAN_LD_PRELOAD:-}" ]; then if [ -n "${R2D2_ROS2_CLI_SETUP:-}" ]; then source "$R2D2_ROS2_CLI_SETUP"; fi; else source "$2"; fi && export ROS_DOMAIN_ID="$3" && export ROS_LOG_DIR="${ROS_LOG_DIR:-/tmp/r2d2_ros_logs}" && export ROS2CLI_NO_DAEMON=1 && mkdir -p "$ROS_LOG_DIR" && if [ "${R2D2_PROFILE:-}" = "sancov" ] && [ -z "${R2D2_TSAN_LD_PRELOAD:-}" ]; then export LD_LIBRARY_PATH="$(strip_r2d2_sancov_paths "${LD_LIBRARY_PATH:-}")" && export PYTHONPATH="$(strip_r2d2_sancov_paths "${PYTHONPATH:-}")" && export AMENT_PREFIX_PATH="$(strip_r2d2_sancov_paths "${AMENT_PREFIX_PATH:-}")" && export CMAKE_PREFIX_PATH="$(strip_r2d2_sancov_paths "${CMAKE_PREFIX_PATH:-}")"; fi && shift 3 && if [ -n "${R2D2_TSAN_LD_PRELOAD:-}" ]; then exec setarch x86_64 -R env LD_PRELOAD="$R2D2_TSAN_LD_PRELOAD" timeout --signal=INT --kill-after=5 "${R2D2_ROS2_CLI_TIMEOUT_SEC}" "$@"; else exec timeout --signal=INT --kill-after=5 "${R2D2_ROS2_CLI_TIMEOUT_SEC}" "$@"; fi
+    - r2d2-ros2-cli
+    - "{{ros_setup}}"
+    - "{{install_setup}}"
+    - "{{domain_id}}"
+    - "{{cli_args...}}"
+
+topic:
+  prefix: [ros2, topic, pub, --once]
+  wait_matching_subscriptions_option: --wait-matching-subscriptions
+  keep_alive_option: --keep-alive
+  qos_profile_option: --qos-profile
+  qos_depth_option: --qos-depth
+  qos_history_option: --qos-history
+  qos_reliability_option: --qos-reliability
+  qos_durability_option: --qos-durability
+
+service:
+  prefix: [ros2, service, call]
+
+action:
+  prefix: [ros2, action, send_goal]
+  timeout_option: --timeout
+
+parameter:
+  prefix: [ros2, param, set]

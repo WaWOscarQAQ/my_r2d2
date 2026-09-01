@@ -8,16 +8,42 @@
 
 ## 一、覆盖率重建 nav2_ws（一次性；换机器或普通构建后重跑）
 
-两种构建二选一：**coverage**（覆盖口径战役，分支总数 ~6.6 万，与历史结果可比）或
-**TSAN+coverage**（并发检测战役；其 lcov 分支总数因 TSAN 插桩膨胀约 2 倍，只作
-战役内部反馈，不与纯 coverage 数字对比——见方案 A 说明）。
+先重建 `nav2_ws`，再重建 overlay；否则 overlay 第二阶段会把 `nav2_costmap_2d`
+重新编回普通模式，实时 lcov 会再次失效。
+
+两种构建必须分开：**coverage** 用于 lcov/gcov 覆盖率战役；**TSAN-only** 用于
+并发检测战役。不要把 `--coverage` 与 `-fsanitize=thread` 混用，否则 `__gcov0.*`
+计数器会成为 TSan 噪声来源。
+
+当前实现用 `R2D2_PROFILE` 固定选择构建产物，避免同一个 build 目录在两种插桩之间
+反复覆盖：
+
+- `R2D2_PROFILE=coverage`：`nav2_ws/build`、`nav2_ws/install`、
+  `overlay_ws/build`、`overlay_ws/install`。
+- `R2D2_PROFILE=tsan`：`nav2_ws/build_tsan`、`nav2_ws/install_tsan`、
+  `overlay_ws/build_tsan`、`overlay_ws/install_tsan`。
+- `R2D2_PROFILE=sancov`：`nav2_ws/build_sancov`、`nav2_ws/install_sancov`、
+  `overlay_ws/build_sancov`、`overlay_ws/install_sancov`。
+
+运行时 `nav2_costmap_e2e` 会从同一份 YAML 读取当前 profile 的
+`R2D2_NAV2_BUILD_BASE` 和 `R2D2_NAV2_INSTALL_SETUP`，所以 coverage campaign 只从
+coverage build 抓 `.gcda`，TSan campaign 只加载 TSan build。`sancov` campaign
+加载 `TSan + LLVM SanitizerCoverage` build，用 edge counter 替代 lcov。
 
 ### 1a. 纯 coverage 构建
 
 ```bash
+cd /home/ocsar/ROS/my_r2d2
+R2D2_PROFILE=coverage scripts/build_nav2_ws.sh --coverage --clean
+R2D2_PROFILE=coverage scripts/build_overlay_ws.sh --clean
+```
+
+等价的底层命令如下。
+
+```bash
 cd /home/ocsar/ROS/my_r2d2/nav2_ws
 bash -c 'source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --parallel-workers 12 \
-  --packages-select r2d2_tracer r2d2_scan_bridge nav2_msgs nav2_common nav2_util nav2_voxel_grid nav2_costmap_2d \
+  --packages-select r2d2_tracer r2d2_scan_bridge nav2_msgs nav2_common nav2_util nav2_voxel_grid nav2_amcl nav2_behaviors nav2_bt_navigator nav2_controller nav2_costmap_2d nav2_lifecycle_manager nav2_map_server nav2_planner nav2_smoother nav2_bringup \
   --cmake-clean-cache \
   --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
   -DCMAKE_C_COMPILER=/usr/bin/cc -DCMAKE_CXX_COMPILER=/usr/bin/c++ \
@@ -26,19 +52,12 @@ bash -c 'source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --pa
   -DCMAKE_EXE_LINKER_FLAGS="--coverage" -DCMAKE_SHARED_LINKER_FLAGS="--coverage"'
 ```
 
-### 1b. TSAN + coverage 构建（并发检测战役用）
+### 1b. TSAN-only 构建（并发检测战役用）
 
 ```bash
-cd /home/ocsar/ROS/my_r2d2/nav2_ws
-bash -c 'source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --parallel-workers 12 \
-  --packages-select r2d2_tracer r2d2_scan_bridge nav2_msgs nav2_common nav2_util nav2_voxel_grid nav2_costmap_2d \
-  --cmake-clean-cache \
-  --cmake-args -DBUILD_TESTING=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DCMAKE_C_COMPILER=/usr/bin/cc -DCMAKE_CXX_COMPILER=/usr/bin/c++ \
-  "-DCMAKE_C_FLAGS=-O1 -g -w -Wno-error -fno-omit-frame-pointer -fsanitize=thread --coverage -fprofile-update=atomic -DCOVERAGE_RUN=1" \
-  "-DCMAKE_CXX_FLAGS=-O1 -g -w -Wno-error -fno-omit-frame-pointer -fsanitize=thread --coverage -fprofile-update=atomic -DCOVERAGE_RUN=1" \
-  "-DCMAKE_EXE_LINKER_FLAGS=-fsanitize=thread --coverage" \
-  "-DCMAKE_SHARED_LINKER_FLAGS=-fsanitize=thread --coverage"'
+cd /home/ocsar/ROS/my_r2d2
+R2D2_PROFILE=tsan scripts/build_nav2_ws.sh --tsan --clean
+R2D2_PROFILE=tsan scripts/build_overlay_ws.sh --clean
 ```
 
 要点：
@@ -47,20 +66,23 @@ bash -c 'source /opt/ros/jazzy/setup.bash && colcon build --symlink-install --pa
   lcov 版本戳冲突（`408*` vs `B33*`）。
 - `-w -Wno-error`：GCC 13 在 coverage 构建下对 std::regex 触发
   `-Werror=null-dereference` 误报，必须压制（与 nav2-_fuzz 的 build_nav2.sh 一致）。
-- `-fprofile-update=atomic`：计数器更新原子化。TSAN 构建下消除计数器伪报；
-  纯 coverage 构建下防止收尾 SIGKILL 撕裂写导致的 "Unexpected negative count"
+- `-fprofile-update=atomic`：仅用于纯 coverage 构建，防止收尾 SIGKILL 撕裂写导致的
+  "Unexpected negative count"
   finalize 失败（示例的 ignore-errors 已含 `negative` 兜底）。
-- 踩坑：**不要用 clang-18 做 TSAN+coverage**——clang 的 profile 运行时与 TSAN 组合
-  会让 costmap 执行器在首个扫描后停摆（回调不再执行）；clang 只适合 TSAN-only。
+- 踩坑：**不要做 TSAN+coverage 合并构建**。gcov 计数器竞争会污染 TSan 报告，
+  clang profile 运行时与 TSAN 组合还会让 costmap 执行器停摆。
 - 桥接节点也被 TSAN 插桩，`setarch -R` 已由示例内建（内核 6.x 高熵 ASLR 下
   TSAN 会 FATAL/漏报；costmap 侧由 launch_stack.sh 处理）。
-- 方案 A（业界标准做法，GCC 官方建议 sanitizer 与 gcov 分开）：覆盖口径战役用 1a，
-  TSAN 战役用 1b；同一 workspace 内切换需干净重建（约 2–3 分钟），切换前归档
-  `results/` 与 `tsan_reports/`（如 `mv results results_tsan_YYYYMMDD`）。
-- 如需完全干净，先删旧产物再构建：
-  `rm -rf build/{nav2_common,nav2_msgs,nav2_util,nav2_voxel_grid,nav2_costmap_2d,r2d2_tracer,r2d2_scan_bridge}`
+- 覆盖口径战役用 1a，TSAN 战役用 1b；两者现在使用不同 build/install/log 目录，
+  不再互相覆盖。输出仍建议分开归档：`results/` 放 lcov，`tsan_reports/` 放 TSan。
+- 如需完全干净，直接使用脚本：
+  `scripts/build_nav2_ws.sh --coverage --clean && scripts/build_overlay_ws.sh --clean`
 
-## 二、清空历史覆盖计数（每次全量前必做）
+## 二、清空历史覆盖计数
+
+`nav2_costmap_e2e` 现在会在战役启动时自动清掉 `nav2_ws/build` 下的旧 `.gcda`，
+避免 `libgcov profiling error: ... different checksum` 污染真实运行日志。
+如果你是**不经过 harness** 手动起 ROS 栈，再单独跑 lcov，仍然要自己先清。
 
 ```bash
 cd /home/ocsar/ROS/my_r2d2/nav2_ws
@@ -72,69 +94,120 @@ rm -rf results
 
 ## 三、全量运行
 
+当前 fuzz harness 仍是 `nav2_costmap_e2e`；完整 Nav2 bringup 的启动入口已补到
+`nav2_ws/launch_nav2_full_stack.sh`，用于下一步把输入用例扩到 AMCL、planner、
+controller、BT navigator、smoother、behaviors 等节点。该脚本依赖第一节的
+`nav2_bringup` 安装产物，并继承同一套 rcl/rclcpp tracer 与 coverage 构建。
+
 ```bash
 cd /home/ocsar/ROS/my_r2d2
-cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42 \
+R2D2_PROFILE=coverage cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42 \
   --lcov-dir nav2_ws/results \
-  --seed-dir tests/fixtures/nav2_seeds
+  --seed-dir config/nav2_seeds
 ```
 
-- `--seed-dir`：引入 nav2-_fuzz 的输入样例（见第五节）。scans 预填 pool，
-  第 1 轮起即从真实扫描变异；schedules 决定每轮发布时序（rate/duration/
-  burst/stamp_mode）。不传该参数则退化为纯随机生成 + 固定 20Hz×2s。
+- `--seed-dir`：引入 nav2-_fuzz 的时序语料（见第五节）。当前只使用
+  `schedules/` 决定每轮发布时序（rate/duration/burst/stamp_mode），
+  不再把单一 `scans/` 样例预填到 payload pool。不传该参数则退化为纯随机
+  生成 + 固定 20Hz×2s。
 - `--lcov-dir`：每轮结束后抓取 lcov 分支覆盖落盘。
-- `--tsan-log-dir`：TSAN 构建下加此参数，报告写入该目录（`tsan.<pid>`）；
-  每轮 SIGUSR1 触发 gcov dump 的 signal-unsafe 告警已通过 `launch_stack.sh`
-  导出的 `TSAN_OPTIONS=report_signal_unsafe=0` 关闭（本地脚本属 gitignore
-  的 nav2_ws，换机重建时需保留该导出）。
+- `--tsan-log-dir`：只在 TSAN-only 构建下使用，报告写入该目录（`tsan.<pid>`）。
+  不允许与 `--lcov-dir` 同时传。
 
 TSAN 战役（1b 构建）全量指令：
 
 ```bash
-cd /home/ocsar/ROS/my_r2d2/nav2_ws
-find build -name "*.gcda" -delete && rm -rf results tsan_reports && mkdir -p tsan_reports
 cd /home/ocsar/ROS/my_r2d2
-cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42 \
-  --lcov-dir nav2_ws/results \
+R2D2_PROFILE=tsan cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42 \
   --tsan-log-dir nav2_ws/tsan_reports \
-  --seed-dir tests/fixtures/nav2_seeds
+  --seed-dir config/nav2_seeds
 ```
 
-已知发现（2026-08-21 战役）：costmap 关闭路径存在真实 data race——
+`nav2_costmap_e2e` 显式拒绝同时传 `--lcov-dir` 与 `--tsan-log-dir`。coverage 的
+每轮反馈来自 `lcov`；TSan 的每轮反馈来自 `tsan.<pid>` 报告文件，两者不在同一进程
+插桩组合里混用。
+
+TSan + SanitizerCoverage 战役：
+
+```bash
+cd /home/ocsar/ROS/my_r2d2
+R2D2_PROFILE=sancov scripts/build_nav2_ws.sh --sancov --clean
+R2D2_PROFILE=sancov scripts/build_overlay_ws.sh --clean
+R2D2_PROFILE=sancov cargo run --example nav2_costmap_e2e -- --rounds 10 --seed 42 \
+  --tsan-log-dir nav2_ws/tsan_reports_sancov \
+  --sancov-dir nav2_ws/sancov_results \
+  --seed-dir config/nav2_seeds
+```
+
+`--sancov-dir` 与 `--lcov-dir` 互斥。输出不是 lcov `.info`，而是原始 `.sancov`
+文件、每轮 `coverage/status.json`、按包 `coverage/packages.json` 和最终
+`summary.json`。反馈单位是 SanitizerCoverage PC，不是 lcov branch。
+
+## 四、实测证据（profile 隔离）
+
+2026-08-26 实测：
+
+- `R2D2_PROFILE=tsan scripts/build_nav2_ws.sh --tsan --clean` 完成，随后
+  `R2D2_PROFILE=tsan scripts/build_overlay_ws.sh --clean` 完成。
+- `find nav2_ws/build_tsan nav2_ws/install_tsan overlay_ws/build_tsan overlay_ws/install_tsan -name '*.gcno' -o -name '*.gcda' | wc -l`
+  输出 `0`，证明 TSan build 不含 gcov 产物。
+- coverage profile 的 1 轮真实 fuzz 完成：
+  `branches 26029/150160 (+11)`，final `26050/150160`，输出目录为
+  `nav2_ws/results_profile_cov_probe/`。
+- TSan profile 的 1 轮真实 fuzz 完成：全栈启动、benchmark `analyzed=1`、
+  round 1 执行完成，`nav2_ws/tsan_reports_profile_probe/` 生成 5 个
+  `tsan.<pid>` 报告。
+- `rg "__gcov|gcov" nav2_ws/tsan_reports_profile_probe` 无匹配，说明 TSan 报告不再被
+  覆盖率计数器污染。
+
+已知发现（2026-08-21 战役）：costmap 关闭路径存在真实 data race：
 `mapUpdateLoop` 线程读 `active_`（costmap_2d_ros.cpp:531）与主线程
 `on_deactivate` 写 `active_`（:353）无同步；影响良性（线程随后被 join），
 但属 nav2 上游真实竞争，见 `nav2_tsan_report.md`。
 
+## 五、每轮结果
+
 每轮结果落盘到 `nav2_ws/results/rounds/round_XXXXXX/`：
 
 - `coverage.info`：本轮到当前为止的累计 lcov 分支覆盖
+- `packages/`：按 9 个目标包拆出的 `*.info`、`*.json` 和 `packages.json`
+- `trace.json`：本轮完整 `CallbackTrace`（call/message trace、lossy、diagnostics）
 - `summary.json`：`round` / `decision` / `calls` / `pool_size` / `crash_or_hang` /
-  `coverage_ok` / `branch_covered_total` / `branch_covered_increase`
+  `coverage_ok` / `branch_covered_total` / `branch_covered_increase` / `packages`
 - `payload.txt`：当轮变异 payload（可复现）
 - `round.txt`：当轮打印行（含本轮 sched 名）
 
-## 四、查看结果
+`callbacks.json` 保存 callback ID 到名称、类型、namespace、RCLCPP/RCL handler 的映射；
+`benchmark/traces/trace_XXXXXX.json` 保存 benchmark 每次成功执行的完整 trace。
+
+## 六、查看结果
 
 ```bash
 cd /home/ocsar/ROS/my_r2d2/nav2_ws/results
+cat coverage/status.json                                      # 最新实时覆盖状态
 cat summary.json                                              # 战役总览
+cat callbacks.json                                            # callback ID 与名称映射
+jq . rounds/round_000001/trace.json                           # 第一轮完整 callback trace
+jq . rounds/round_000001/packages/packages.json                # 第一轮 9 包分支覆盖
+jq . packages/packages.json                                    # final 9 包分支覆盖
 grep -hE '"branch_covered_(total|increase)"' rounds/round_*/summary.json   # 每轮累计与增量
 lcov --summary coverage_total.info --rc branch_coverage=1     # 总体行/函数/分支覆盖
 # HTML 报告：lcov_html/index.html（浏览器打开）
 ```
 
-仅统计目标包（对齐论文 Table 4 的"单程序"口径，排除生成代码与系统头）：
+当前自动拆分的 9 个重点包来自图片中的目标集合：
 
-```bash
-cd /home/ocsar/ROS/my_r2d2/nav2_ws/results
-lcov --extract coverage_total.info '*/navigation2/nav2_costmap_2d/*' \
-  --rc branch_coverage=1 -o costmap_only.info
-lcov --summary costmap_only.info --rc branch_coverage=1
-```
+`nav2_amcl`、`nav2_behaviors`、`nav2_bt_navigator`、`nav2_controller`、
+`nav2_costmap_2d`、`nav2_lifecycle_manager`、`nav2_map_server`、`nav2_planner`、
+`nav2_smoother`。
 
-## 五、输入样例语料（nav2-_fuzz 种子）
+每个 `*.json` 都记录 `branch_covered_total`、`branch_total`、
+`expected_branch_total` 和 `matches_expected_branch_total`。`expected_branch_total`
+来自图片中的 9 包源码过滤口径，用于检查本机 lcov/gcov 口径是否一致。
 
-语料位于 `tests/fixtures/nav2_seeds/`，由 `scripts/import_nav2_seeds.py`
+## 七、输入样例语料（nav2-_fuzz 种子）
+
+语料位于 `config/nav2_seeds/`，由 `scripts/import_nav2_seeds.py`
 从 nav2-_fuzz 的 `seed_pool`/`local_seed_pool` 一次性转换而来：
 
 - `scans/*.txt`：两行文本扫描（7 标量 + ranges，即 bridge 的 payload 格式）。
@@ -151,10 +224,10 @@ lcov --summary costmap_only.info --rc branch_coverage=1
 ```bash
 python3 scripts/import_nav2_seeds.py \
   --source /home/ocsar/ROS/nav2-_fuzz \
-  --output tests/fixtures/nav2_seeds
+  --output config/nav2_seeds
 ```
 
-## 六、回归
+## 八、回归
 
 ```bash
 cd /home/ocsar/ROS/my_r2d2 && cargo test          # 87 项全过
@@ -171,14 +244,19 @@ cd /home/ocsar/ROS/my_r2d2 && cargo test          # 87 项全过
 | `--bridge-rate Hz` | 20 | 发布频率 |
 | `--latency-factor` | 2.0 | new-state 延迟判据 |
 | `--throughput-floor` | 0.5 | new-state 吞吐判据 |
-| `--tsan-log-dir 路径` | 无 | 与 lcov 可同时开，TSAN 报告按轮落盘 |
-| `--seed-dir 路径` | 无 | nav2-_fuzz 语料目录（scans/ 预填 pool，schedules/ 驱动每轮时序） |
+| `--tsan-log-dir 路径` | 无 | 只用于 TSAN-only 战役，不可与 `--lcov-dir` 同时传 |
+| `--seed-dir 路径` | 无 | nav2-_fuzz 语料目录（当前只使用 `schedules/` 驱动每轮时序） |
 
 ## 注意事项
 
 - lcov 2.0 已废弃 `lcov_branch_coverage`，一律用 `--rc branch_coverage=1`。
 - `coverage_total.info` 的总分支（约 6.6 万）含 nav2_msgs 生成代码与系统头内联，
-  与论文 Table 4 的"单程序已覆盖分支数"不可直接比较；对齐口径见第四节。
+  与论文 Table 4 的"单程序已覆盖分支数"不可直接比较；优先看 `packages/`
+  下的 9 包源码过滤结果。
+- 实时 coverage flush 已改为对 full-stack Nav2 进程组发送 `SIGUSR1`，让多个目标包同时 dump `.gcda`。
 - 单接口（仅 /scan）场景下，obstacle_layer 可达分支在第 1 轮即基本饱和，
   后续轮 `branch_covered_increase` 多为 0 属正常现象；扩展插桩面（static_layer、
   PointCloud2、action 输入等）后覆盖会随轮次继续增长。
+- 本文档当前命令仍运行 `nav2_costmap_e2e`，但该 harness 已固定为 full-stack
+  Nav2 合并路线；输入面来自 67 个 topic/service/action/safe-parameter-profile
+  binding，并按 9 个 Nav2 目标包做覆盖分包统计。

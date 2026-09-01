@@ -58,12 +58,12 @@ void write_sequence() {
   tracer::round_boundary(1, 700);
 }
 
-// Overwrites each ring beyond its capacity: registration_capacity + 2
-// callbacks (two records each) and runtime_capacity + 2 events, with
+// Overwrites each ring beyond its capacity: reg_capacity + 2
+// callbacks (two records each) and rt_capacity + 2 events, with
 // handlers and timestamps derived from the index.
-void write_overflow_sequence(std::uint64_t registration_capacity,
-                             std::uint64_t runtime_capacity) {
-  for (std::uint64_t i = 0; i < registration_capacity + 2; ++i) {
+void write_overflow_sequence(std::uint64_t reg_capacity,
+                             std::uint64_t rt_capacity) {
+  for (std::uint64_t i = 0; i < reg_capacity + 2; ++i) {
     const std::uint64_t handler = 0xa000 + i;
     tracer::rclcpp_callback_init(reinterpret_cast<const void*>(handler),
                                  reinterpret_cast<const void*>(handler + 0x100),
@@ -71,7 +71,7 @@ void write_overflow_sequence(std::uint64_t registration_capacity,
     tracer::rcl_callback_init("overflow_callback", "/overflow",
                               reinterpret_cast<const void*>(handler + 0x100));
   }
-  for (std::uint64_t i = 0; i < runtime_capacity + 2; ++i) {
+  for (std::uint64_t i = 0; i < rt_capacity + 2; ++i) {
     tracer::executor_execute(reinterpret_cast<const void*>(0xa000 + i), 1000 + i * 10);
   }
 }
@@ -146,15 +146,15 @@ void write_stress(std::uint64_t rounds, std::uint64_t threads) {
   }
 }
 
-void dump_fixture(const std::string& path, std::uint64_t registration_capacity,
-                  std::uint64_t runtime_capacity) {
+void dump_fixture(const std::string& path, std::uint64_t reg_capacity,
+                  std::uint64_t rt_capacity) {
   const auto* image = static_cast<const std::uint8_t*>(tracer::image());
   const std::size_t size = tracer::image_size();
   std::vector<std::uint8_t> copy(image, image + size);
 
   const std::uint64_t registration_ring = align_up(sizeof(tracer::SharedHeader), 8);
   const std::uint64_t runtime_ring = registration_ring + sizeof(tracer::RingHeader) +
-                                     registration_capacity *
+                                     reg_capacity *
                                          sizeof(tracer::RegistrationRecord);
   std::memset(copy.data() + registration_ring, 0, sizeof(pthread_mutex_t));
   std::memset(copy.data() + runtime_ring, 0, sizeof(pthread_mutex_t));
@@ -173,8 +173,8 @@ void dump_fixture(const std::string& path, std::uint64_t registration_capacity,
 int main(int argc, char** argv) {
   std::string shm_name;
   std::string fixture_path;
-  std::uint64_t registration_capacity = 8;
-  std::uint64_t runtime_capacity = 16;
+  std::uint64_t reg_capacity = 8;
+  std::uint64_t rt_capacity = 16;
   bool overflow = false;
   bool cleanup = false;
   bool live = false;
@@ -204,9 +204,9 @@ int main(int argc, char** argv) {
     if (arg == "--fixture") {
       fixture_path = next_value("--fixture");
     } else if (arg == "--reg-capacity") {
-      registration_capacity = std::stoull(next_value("--reg-capacity"));
+      reg_capacity = std::stoull(next_value("--reg-capacity"));
     } else if (arg == "--runtime-capacity") {
-      runtime_capacity = std::stoull(next_value("--runtime-capacity"));
+      rt_capacity = std::stoull(next_value("--runtime-capacity"));
     } else if (arg == "--overflow") {
       overflow = true;
     } else if (arg == "--cleanup") {
@@ -265,14 +265,14 @@ int main(int argc, char** argv) {
   }
 
   try {
-    tracer::init(shm_name.c_str(), registration_capacity, runtime_capacity);
+    tracer::init(shm_name.c_str(), reg_capacity, rt_capacity);
     if (stress) {
       write_stress(stress_rounds, threads);
     } else if (live) {
       write_live_sequence(sched_sub, exec_sub, sched_timer, exec_timer, buffer_size,
                           pub_timestamp, sub_timestamp, skip_timer);
     } else if (overflow) {
-      write_overflow_sequence(registration_capacity, runtime_capacity);
+      write_overflow_sequence(reg_capacity, rt_capacity);
     } else {
       write_sequence();
     }
@@ -280,7 +280,7 @@ int main(int argc, char** argv) {
       tracer::round_boundary(static_cast<std::uint32_t>(mark_round), tracer::now_ns());
     }
     if (!fixture_path.empty()) {
-      dump_fixture(fixture_path, registration_capacity, runtime_capacity);
+      dump_fixture(fixture_path, reg_capacity, rt_capacity);
     }
   } catch (const std::exception& error) {
     std::cerr << "mock_writer: " << error.what() << std::endl;

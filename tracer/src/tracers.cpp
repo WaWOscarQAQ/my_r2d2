@@ -4,13 +4,18 @@
 #include "tracer/tracers.h"
 
 #include <cerrno>
+#include <atomic>
 #include <cstdint>
+#include <csignal>
 #include <cstring>
 #include <ctime>
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <mutex>
 #include <new>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -20,8 +25,8 @@ namespace tracer {
 
 namespace {
 
-constexpr std::uint64_t kDefaultRegistrationCapacity = 1024;
-constexpr std::uint64_t kDefaultRuntimeCapacity = 4096;
+constexpr std::uint64_t kDefaultRegistrationCapacity = 16384;
+constexpr std::uint64_t kDefaultRuntimeCapacity = 262144;
 
 std::uint64_t align_up(std::uint64_t value, std::uint64_t alignment) {
   return (value + alignment - 1) / alignment * alignment;
@@ -36,7 +41,12 @@ RingBuffer<RegistrationRecord> g_registration;
 RingBuffer<RuntimeRecord> g_runtime;
 
 std::uint64_t address_of(const void* pointer) {
-  return reinterpret_cast<std::uint64_t>(pointer);
+  std::uint64_t value = 1469598103934665603ULL;
+  value ^= static_cast<std::uint64_t>(::getpid());
+  value *= 1099511628211ULL;
+  value ^= reinterpret_cast<std::uint64_t>(pointer);
+  value *= 1099511628211ULL;
+  return value;
 }
 
 // Copies a NUL-terminated string into a fixed-capacity record field,
@@ -57,6 +67,80 @@ void copy_string_field(char* dest, std::size_t capacity, const char* source,
   throw std::runtime_error(std::string(operation) + ": " + std::strerror(errno));
 }
 
+using SanitizerCovDump = void (*)();
+SanitizerCovDump g_sanitizer_cov_dump = nullptr;
+int g_sancov_signal_pipe[2] = {-1, -1};
+std::once_flag g_sancov_signal_install_once;
+
+void resolve_sancov_dump() noexcept {
+  if (g_sanitizer_cov_dump == nullptr) {
+    g_sanitizer_cov_dump =
+        reinterpret_cast<SanitizerCovDump>(dlsym(RTLD_DEFAULT, "__sanitizer_cov_dump"));
+  }
+}
+
+void request_sancov_dump_on_signal(int) {
+  const int fd = g_sancov_signal_pipe[1];
+  if (fd >= 0) {
+    const char byte = 1;
+    const ssize_t ignored = ::write(fd, &byte, sizeof(byte));
+    (void)ignored;
+  }
+}
+
+void sancov_dump_worker() noexcept {
+  char buffer[64];
+  for (;;) {
+    const ssize_t n = ::read(g_sancov_signal_pipe[0], buffer, sizeof(buffer));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+    if (n == 0) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      continue;
+    }
+    resolve_sancov_dump();
+    if (g_sanitizer_cov_dump != nullptr) {
+      g_sanitizer_cov_dump();
+    }
+  }
+}
+
+void install_sancov_signal_handler() noexcept {
+  const char* dir = std::getenv("R2D2_SANCOV_DIR");
+  if (dir != nullptr && *dir != '\0') {
+    try {
+      std::call_once(g_sancov_signal_install_once, []() {
+        resolve_sancov_dump();
+        if (g_sanitizer_cov_dump == nullptr) {
+          return;
+        }
+        if (::pipe(g_sancov_signal_pipe) != 0) {
+          g_sancov_signal_pipe[0] = -1;
+          g_sancov_signal_pipe[1] = -1;
+          return;
+        }
+        const int flags = ::fcntl(g_sancov_signal_pipe[1], F_GETFL, 0);
+        if (flags >= 0) {
+          (void)::fcntl(g_sancov_signal_pipe[1], F_SETFL, flags | O_NONBLOCK);
+        }
+        std::thread(sancov_dump_worker).detach();
+        std::signal(SIGUSR2, request_sancov_dump_on_signal);
+      });
+    } catch (...) {
+      // Coverage dumping must never alter ROS control flow.
+    }
+  }
+}
+
+__attribute__((constructor)) void install_sancov_signal_handler_at_load() {
+  install_sancov_signal_handler();
+}
+
 }  // namespace
 
 std::uint64_t now_ns() noexcept {
@@ -66,39 +150,49 @@ std::uint64_t now_ns() noexcept {
          static_cast<std::uint64_t>(ts.tv_nsec);
 }
 
-void init(const char* shm_name, std::uint64_t registration_capacity,
-          std::uint64_t runtime_capacity) {
+void init(const char* shm_name, std::uint64_t reg_capacity,
+          std::uint64_t rt_capacity) {
   if (g_shm.data() != nullptr) {
     throw std::logic_error("tracer shared memory already initialized");
   }
-  if (registration_capacity == 0 || runtime_capacity == 0) {
+  if (reg_capacity == 0 || rt_capacity == 0) {
     throw std::invalid_argument("capacities must be positive");
   }
 
   const std::uint64_t registration_ring =
-      ring_bytes(registration_capacity, sizeof(RegistrationRecord));
+      ring_bytes(reg_capacity, sizeof(RegistrationRecord));
   const std::uint64_t runtime_ring =
-      ring_bytes(runtime_capacity, sizeof(RuntimeRecord));
+      ring_bytes(rt_capacity, sizeof(RuntimeRecord));
   const std::uint64_t shm_size =
       align_up(sizeof(SharedHeader), 8) + registration_ring + runtime_ring;
 
   g_shm = SharedMemory::create(shm_name, shm_size);
 
   auto* header = new (g_shm.data()) SharedHeader();
-  header->magic = kTraceMagic;
-  header->version = kTraceVersion;
+  header->magic = 0;
+  header->version = 0;
   header->shm_size = shm_size;
-  header->registration_capacity = registration_capacity;
-  header->registration_records_offset =
+  header->reg_capacity = reg_capacity;
+  header->reg_records_offset =
       align_up(sizeof(SharedHeader), 8) + sizeof(RingHeader);
-  header->runtime_capacity = runtime_capacity;
-  header->runtime_records_offset =
+  header->rt_capacity = rt_capacity;
+  header->rt_records_offset =
       align_up(sizeof(SharedHeader), 8) + registration_ring + sizeof(RingHeader);
 
   auto* base = static_cast<std::uint8_t*>(g_shm.data());
-  g_registration.init(base + align_up(sizeof(SharedHeader), 8), registration_capacity);
+  g_registration.init(base + align_up(sizeof(SharedHeader), 8), reg_capacity);
   g_runtime.init(base + align_up(sizeof(SharedHeader), 8) + registration_ring,
-                 runtime_capacity);
+                 rt_capacity);
+
+  // Publish the magic/version only after the ring headers are initialized.
+  // Other instrumented ROS processes may attach concurrently as soon as
+  // shm_open succeeds; if they see a valid SharedHeader before RingHeader
+  // capacity is written, writers can later divide by zero in RingBuffer::push.
+  std::atomic_thread_fence(std::memory_order_release);
+  header->magic = kTraceMagic;
+  header->version = kTraceVersion;
+
+  install_sancov_signal_handler();
 }
 
 void init(const char* shm_name) {
@@ -117,15 +211,22 @@ void attach(const char* shm_name) {
     throw std::runtime_error("shared memory magic/version mismatch");
   }
   if (header->shm_size != g_shm.size() ||
-      header->registration_records_offset > header->shm_size ||
-      header->runtime_records_offset > header->shm_size) {
+      header->reg_records_offset > header->shm_size ||
+      header->rt_records_offset > header->shm_size) {
     throw std::runtime_error("shared memory header is inconsistent");
   }
 
   const std::uint64_t registration_ring =
-      ring_bytes(header->registration_capacity, sizeof(RegistrationRecord));
+      ring_bytes(header->reg_capacity, sizeof(RegistrationRecord));
   g_registration.attach(base + align_up(sizeof(SharedHeader), 8));
   g_runtime.attach(base + align_up(sizeof(SharedHeader), 8) + registration_ring);
+  if (g_registration.capacity() != header->reg_capacity ||
+      g_runtime.capacity() != header->rt_capacity ||
+      g_registration.capacity() == 0 || g_runtime.capacity() == 0) {
+    throw std::runtime_error("shared memory ring header is inconsistent");
+  }
+
+  install_sancov_signal_handler();
 }
 
 void rclcpp_callback_init(const void* rclcpp_handler, const void* rcl_handler,
@@ -254,7 +355,7 @@ SharedMemory::~SharedMemory() {
 }
 
 SharedMemory SharedMemory::create(const char* name, std::size_t size) {
-  const int fd = shm_open(name, O_CREAT | O_RDWR, 0600);
+  const int fd = shm_open(name, O_CREAT | O_EXCL | O_RDWR, 0600);
   if (fd < 0) {
     throw_system("shm_open");
   }

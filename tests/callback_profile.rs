@@ -7,13 +7,8 @@ use my_r2d2::callback_profile::{
 };
 use my_r2d2::trace_buffer::{
     CallbackType, RegistrationDrain, RegistrationEvent, RegistrationSource, RuntimeDrain,
-    RuntimeEvent, RuntimeEventType, TraceReader,
+    RuntimeEvent, RuntimeEventType,
 };
-use std::path::{Path, PathBuf};
-
-fn fixtures_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
-}
 
 fn reg(
     source: RegistrationSource,
@@ -67,6 +62,19 @@ fn take(rcl_handler: u64, buffer_size: u64, pub_ts: u64, sub_ts: u64) -> Runtime
         pub_ts,
         sub_ts,
     )
+}
+
+fn boundary(round_id: u32, ts: u64) -> RuntimeEvent {
+    RuntimeEvent {
+        event_type: RuntimeEventType::RoundBoundary,
+        rclcpp_handler: 0,
+        timestamp: ts,
+        rcl_handler: 0,
+        buffer_size: 0,
+        pub_timestamp: 0,
+        sub_timestamp: 0,
+        round_id,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -151,52 +159,6 @@ fn golden_registration() -> Vec<RegistrationEvent> {
             "/ns",
         ),
     ]
-}
-
-fn assert_approx(actual: f64, expected: f64) {
-    assert!(
-        (actual - expected).abs() < 1e-9,
-        "expected {expected}, got {actual}"
-    );
-}
-
-#[test]
-fn golden_fixture_builds_two_complete_callback_infos() {
-    let mut reader = TraceReader::open(fixtures_dir().join("trace_golden.bin")).unwrap();
-    let infos = build_callback_infos(&reader.drain_registration().unwrap().events);
-
-    assert_eq!(infos.len(), 2);
-    assert_eq!(infos[0].rcl_handler, 0x2000);
-    assert_eq!(infos[0].rclcpp_handler, 0x1000);
-    assert_eq!(infos[0].name, "/cmd_vel_callback");
-    assert_eq!(infos[0].callback_type, CallbackType::Subscription);
-    assert_eq!(infos[1].rcl_handler, 0x4000);
-    assert_eq!(infos[1].callback_type, CallbackType::Timer);
-    // The namespace is a paper §4.1.1 registration attribute; it is
-    // collected but never enters the Figure 5 callback ID.
-    assert_eq!(infos[0].namespace, "/robot");
-    assert_eq!(infos[1].namespace, "/robot");
-}
-
-#[test]
-fn golden_fixture_profiles_latencies_and_throughput() {
-    let mut reader = TraceReader::open(fixtures_dir().join("trace_golden.bin")).unwrap();
-    let mut registry = CallbackRegistry::new();
-    registry.ingest(&reader.drain_registration().unwrap());
-    let infos = registry.callback_infos();
-    let trace = profile_trace(&registry, &reader.drain_runtime().unwrap());
-
-    assert_eq!(trace.call_trace.len(), 2);
-    assert_eq!(trace.call_trace[0].callback_id, infos[0].id);
-    assert_eq!(trace.call_trace[0].scheduling_latency, Some(100));
-    assert_eq!(trace.call_trace[0].execution_latency, 100);
-    assert_eq!(trace.call_trace[1].callback_id, infos[1].id);
-    assert_eq!(trace.call_trace[1].scheduling_latency, Some(100));
-    assert_eq!(trace.call_trace[1].execution_latency, 100);
-    assert_eq!(trace.msg_trace.len(), 2);
-    assert_approx(trace.msg_trace[0].throughput, 512.0 / 40.0);
-    assert_approx(trace.msg_trace[1].throughput, 1024.0 / 40.0);
-    assert!(trace.valid_for_state_analysis());
 }
 
 #[test]
@@ -286,9 +248,8 @@ fn callback_id_is_deterministic_and_differs_by_type() {
 }
 
 #[test]
-fn conflicting_registration_is_first_wins_and_invalidates_feedback() {
+fn conflicting_registration_is_latest_wins_without_poisoning_feedback() {
     let mut registry = registry(complete_registration());
-    let original = registry.callback_infos()[0].clone();
     registry.ingest(&registration_drain(
         vec![reg(
             RegistrationSource::Rcl,
@@ -301,10 +262,11 @@ fn conflicting_registration_is_first_wins_and_invalidates_feedback() {
         0,
     ));
 
-    assert_eq!(registry.callback_infos()[0], original);
+    assert_eq!(registry.callback_infos()[0].name, "/different");
     assert_eq!(registry.registration_conflicts(), 1);
     let trace = profile_trace(&registry, &runtime_drain(Vec::new(), 0));
-    assert!(!trace.valid_for_state_analysis());
+    assert_eq!(trace.diagnostics.registration_conflicts, 1);
+    assert!(trace.valid_for_state_analysis());
 }
 
 #[test]
@@ -374,6 +336,27 @@ fn missing_invoke_alone_does_not_invalidate_feedback() {
 }
 
 #[test]
+fn leftover_executor_invoke_alone_does_not_invalidate_feedback() {
+    let registry = registry(complete_registration());
+    let trace = profile_trace(
+        &registry,
+        &runtime_drain(
+            vec![
+                execute(0x1000, 10),
+                start(0x1000, 20),
+                end(0x1000, 30),
+                execute(0x1000, 40),
+            ],
+            0,
+        ),
+    );
+
+    assert_eq!(trace.call_trace.len(), 1);
+    assert_eq!(trace.diagnostics.unmatched_runtime_events, 1);
+    assert!(trace.valid_for_state_analysis());
+}
+
+#[test]
 fn overflow_mispair_never_becomes_valid_zero_latency() {
     let registry = registry(complete_registration());
     let trace = profile_trace(
@@ -430,7 +413,45 @@ fn unpaired_and_unknown_events_are_reported() {
 
     assert_eq!(trace.diagnostics.unmatched_runtime_events, 2);
     assert_eq!(trace.diagnostics.unknown_handlers, 1);
+    assert_eq!(trace.diagnostics.unknown_rcl_take_handlers, 1);
+    assert!(trace.valid_for_state_analysis());
+}
+
+#[test]
+fn unknown_callback_handler_still_invalidates_feedback() {
+    let registry = registry(complete_registration());
+    let trace = profile_trace(
+        &registry,
+        &runtime_drain(vec![execute(0x9999, 10), take(0x9998, 1, 1, 2)], 0),
+    );
+
+    assert_eq!(trace.diagnostics.unknown_handlers, 2);
+    assert_eq!(trace.diagnostics.unknown_rcl_take_handlers, 1);
     assert!(!trace.valid_for_state_analysis());
+}
+
+#[test]
+fn unknown_rcl_take_does_not_invalidate_known_trace() {
+    let registry = registry(complete_registration());
+    let trace = profile_trace(
+        &registry,
+        &runtime_drain(
+            vec![
+                execute(0x1000, 10),
+                start(0x1000, 20),
+                take(0x9999, 128, 25, 30),
+                take(0x2000, 128, 30, 40),
+                end(0x1000, 50),
+            ],
+            0,
+        ),
+    );
+
+    assert_eq!(trace.call_trace.len(), 1);
+    assert_eq!(trace.msg_trace.len(), 1);
+    assert_eq!(trace.diagnostics.unknown_handlers, 1);
+    assert_eq!(trace.diagnostics.unknown_rcl_take_handlers, 1);
+    assert!(trace.valid_for_state_analysis());
 }
 
 #[test]
@@ -447,6 +468,32 @@ fn non_positive_message_duration_is_reported() {
     assert!(trace.msg_trace.is_empty());
     assert_eq!(trace.diagnostics.invalid_message_durations, 2);
     assert!(!trace.valid_for_state_analysis());
+}
+
+#[test]
+fn round_boundary_events_do_not_affect_profile_metrics() {
+    let registry = registry(complete_registration());
+    let trace = profile_trace(
+        &registry,
+        &runtime_drain(
+            vec![
+                boundary(7, 1),
+                execute(0x1000, 10),
+                start(0x1000, 20),
+                take(0x2000, 128, 30, 40),
+                end(0x1000, 50),
+                boundary(8, 60),
+            ],
+            0,
+        ),
+    );
+
+    assert_eq!(trace.call_trace.len(), 1);
+    assert_eq!(trace.msg_trace.len(), 1);
+    assert_eq!(trace.diagnostics.unknown_handlers, 0);
+    assert_eq!(trace.diagnostics.unknown_rcl_take_handlers, 0);
+    assert_eq!(trace.diagnostics.unmatched_runtime_events, 0);
+    assert!(trace.valid_for_state_analysis());
 }
 
 #[test]
@@ -576,20 +623,4 @@ fn same_name_and_type_across_namespaces_is_a_collision() {
     let trace = profile_trace(&registry, &runtime_drain(Vec::new(), 0));
     assert_eq!(trace.diagnostics.callback_id_collisions, 1);
     assert!(!trace.valid_for_state_analysis());
-}
-
-#[test]
-fn round_boundary_markers_are_framing_not_callbacks() {
-    let registry = registry(complete_registration());
-    let mut marker = runtime(RuntimeEventType::RoundBoundary, 0, 999, 0, 0, 0, 0);
-    marker.round_id = 3;
-    let trace = profile_trace(
-        &registry,
-        &runtime_drain(vec![start(0x1000, 20), marker, end(0x1000, 30)], 0),
-    );
-
-    assert_eq!(trace.call_trace.len(), 1);
-    assert_eq!(trace.diagnostics.unmatched_runtime_events, 0);
-    assert_eq!(trace.diagnostics.unknown_handlers, 0);
-    assert!(trace.valid_for_state_analysis());
 }

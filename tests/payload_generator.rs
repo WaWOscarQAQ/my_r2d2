@@ -3,7 +3,9 @@
 
 use my_r2d2::interface_extractor::{DataFile, Field, Interface, Kind, Primitive, TypeNode};
 use my_r2d2::payload::{Error, Payload, Serializer, SimpleSerializer, Value, ValueTree};
-use my_r2d2::payload_generator::{GeneratorConfig, PayloadGenerator, Sender, StateOracle};
+use my_r2d2::payload_generator::{
+    FreshSelectionPolicy, GeneratorConfig, PayloadGenerator, Sender, StateOracle,
+};
 use my_r2d2::payload_pool::{PayloadPool, SelectionPolicy};
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -111,6 +113,48 @@ fn same_seed_reproduces_identical_payload() {
 }
 
 #[test]
+fn round_robin_fresh_selection_cycles_interfaces() {
+    let scalar =
+        |name: &str| Interface::new(name, Kind::Topic, vec![Field::new("value", Primitive::F64)]);
+    let config = GeneratorConfig {
+        fresh_selection: FreshSelectionPolicy::RoundRobin,
+        ..GeneratorConfig::default()
+    };
+    let mut generator =
+        PayloadGenerator::new(vec![scalar("a"), scalar("b"), scalar("c")], config, 101);
+
+    let ids = (0..4)
+        .map(|_| generator.next_payload().unwrap().interface_id)
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, ["a", "b", "c", "a"]);
+}
+
+#[test]
+fn shuffle_cycle_fresh_selection_covers_all_interfaces_before_repeating() {
+    let scalar =
+        |name: &str| Interface::new(name, Kind::Topic, vec![Field::new("value", Primitive::F64)]);
+    let config = GeneratorConfig {
+        fresh_selection: FreshSelectionPolicy::ShuffleCycle,
+        ..GeneratorConfig::default()
+    };
+    let mut generator = PayloadGenerator::new(
+        vec![scalar("a"), scalar("b"), scalar("c"), scalar("d")],
+        config,
+        202,
+    );
+
+    let ids = (0..5)
+        .map(|_| generator.next_payload().unwrap().interface_id)
+        .collect::<Vec<_>>();
+    let mut first_cycle = ids[..4].to_vec();
+    first_cycle.sort();
+
+    assert_eq!(first_cycle, ["a", "b", "c", "d"]);
+    assert_eq!(ids[4], ids[0]);
+}
+
+#[test]
 fn pool_payload_is_mutated_in_place_of_generation() {
     let interface = twist_interface();
     let mut generator = PayloadGenerator::new(vec![interface], GeneratorConfig::default(), 5);
@@ -121,6 +165,39 @@ fn pool_payload_is_mutated_in_place_of_generation() {
     assert_eq!(mutated.interface_id, original.interface_id);
     assert_eq!(mutated.kind, original.kind);
     assert_ne!(mutated.value, original.value);
+}
+
+#[test]
+fn fresh_generation_period_can_bypass_non_empty_pool() {
+    let interface = Interface::new(
+        "scalar",
+        Kind::Topic,
+        vec![Field::new("value", Primitive::F64)],
+    );
+    let config = GeneratorConfig {
+        mutation_energy: 0,
+        fresh_generation_period: Some(1),
+        ..GeneratorConfig::default()
+    };
+    let mut generator = PayloadGenerator::new(vec![interface], config, 13);
+    generator.pool_mut().push(Payload::new(
+        "scalar",
+        Kind::Topic,
+        ValueTree::Nested(vec![ValueTree::Leaf(Value::F64(1.0e9))]),
+        999,
+    ));
+
+    let payload = generator.next_payload().unwrap();
+    let ValueTree::Nested(fields) = &payload.value else {
+        panic!("expected nested root");
+    };
+    let ValueTree::Leaf(Value::F64(value)) = fields.first().unwrap() else {
+        panic!("expected f64 leaf");
+    };
+    assert!(
+        (-1000.0..=1000.0).contains(value),
+        "fresh generation should use configured primitive ranges, got {value}"
+    );
 }
 
 #[test]
@@ -209,13 +286,13 @@ fn arrays_are_generated_within_configured_ranges() {
 }
 
 #[test]
-fn string_and_bytes_round_trip() {
+fn string_and_byte_array_round_trip() {
     let interface = Interface::new(
         "/chatter",
         Kind::Topic,
         vec![
             Field::new("frame_id", Primitive::String),
-            Field::new("blob", Primitive::Bytes),
+            Field::new("blob", TypeNode::array(Primitive::U8.into())),
         ],
     );
     let mut generator =

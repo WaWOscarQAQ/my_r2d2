@@ -2,3 +2,9 @@
 /tracer/build
 /.zcode
 /nav2_ws/
+/llvm_instrumentation/build/
+/llvm_instrumentation/build.*/
+/llvm_overlay_ws/
+/overlay_ws/
+/outputs/
+/.codex_artifacts/

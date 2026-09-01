@@ -1,0 +1,65 @@
+version: 1
+
+# `{{name}}` substitutes one runtime value inside one argv token.
+# `{{name...}}` expands a list into multiple argv tokens and must occupy the
+# complete token. Values are never reparsed by a shell.
+commands:
+  nav2_stack:
+    executable: setsid
+    args: [bash, "{{stack_script}}"]
+
+  process_list:
+    executable: ps
+    args: [-eo, "pid=,pgid=,args="]
+
+  signal_process_group:
+    executable: kill
+    args: ["{{signal}}", --, "-{{pgid}}"]
+
+  signal_process:
+    executable: kill
+    args: ["{{signal}}", --, "{{pid}}"]
+
+  lcov_capture:
+    executable: lcov
+    args:
+      - --capture
+      - "{{gcov_tool_args...}}"
+      - --directory
+      - "{{build_dir}}"
+      - --rc
+      - branch_coverage=1
+      - --ignore-errors
+      - "{{ignore_errors}}"
+      - --output-file
+      - "{{output_file}}"
+      - --quiet
+
+  lcov_summary:
+    executable: lcov
+    args: [--summary, "{{info_file}}", --rc, branch_coverage=1]
+
+  lcov_extract:
+    executable: lcov
+    args:
+      - --extract
+      - "{{info_file}}"
+      - "{{source_pattern}}"
+      - --rc
+      - branch_coverage=1
+      - --ignore-errors
+      - empty,unused,source
+      - --output-file
+      - "{{output_file}}"
+      - --quiet
+
+  genhtml:
+    executable: genhtml
+    args:
+      - "{{info_file}}"
+      - --rc
+      - branch_coverage=1
+      - --branch-coverage
+      - --output-directory
+      - "{{output_dir}}"
+      - --quiet

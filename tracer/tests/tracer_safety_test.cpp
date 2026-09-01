@@ -35,7 +35,7 @@ int main() {
   const auto* image = static_cast<const std::uint8_t*>(tracer::image());
   const auto* header = reinterpret_cast<const tracer::SharedHeader*>(image);
   const auto* records = reinterpret_cast<const tracer::RegistrationRecord*>(
-      image + header->registration_records_offset);
+      image + header->reg_records_offset);
   assert(records[1].source == tracer::RegistrationSource::Rcl);
   assert(records[1].callback_name_len == tracer::kCallbackNameCapacity);
   assert((records[1].flags & tracer::kRegistrationFlagNameTruncated) != 0);
@@ -45,7 +45,7 @@ int main() {
   // Round markers append to the runtime ring without disturbing registration.
   tracer::round_boundary(7, 123);
   const auto* runtime_records = reinterpret_cast<const tracer::RuntimeRecord*>(
-      image + header->runtime_records_offset);
+      image + header->rt_records_offset);
   assert(runtime_records[0].event_type == tracer::RuntimeEventType::RoundBoundary);
   assert(runtime_records[0].aux == 7);
   assert(runtime_records[0].timestamp == 123);

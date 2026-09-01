@@ -16,7 +16,7 @@ use crate::interface_extractor::{Interface, Primitive, TypeNode};
 use crate::mutation::{Mutator, OperatorWeights, OperatorsPerType, generate_value};
 use crate::payload::{Error, Payload, Serializer, SimpleSerializer};
 use crate::payload_pool::{PayloadPool, SelectionPolicy};
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, SeedableRng, rngs::StdRng, seq::SliceRandom};
 use std::collections::BTreeMap;
 
 /// A numeric range used for value generation and boundary mutation.
@@ -32,9 +32,8 @@ impl ValueRange {
     }
 }
 
-/// Per-primitive value ranges. `String`/`Bytes` ranges are interpreted as
-/// byte length ranges; the `Bool` range is unused because bools are drawn
-/// uniformly.
+/// Per-primitive value ranges. `String` ranges are interpreted as byte
+/// lengths; the `Bool` range is unused because bools are drawn uniformly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ValueRanges {
     ranges: BTreeMap<Primitive, ValueRange>,
@@ -62,10 +61,11 @@ fn default_range(primitive: Primitive) -> ValueRange {
         | Primitive::I64
         | Primitive::F32
         | Primitive::F64 => ValueRange::new(-1000.0, 1000.0),
-        Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => {
+        Primitive::U8 => ValueRange::new(0.0, 255.0),
+        Primitive::U16 | Primitive::U32 | Primitive::U64 => {
             ValueRange::new(0.0, 1000.0)
         }
-        Primitive::String | Primitive::Bytes => ValueRange::new(0.0, 64.0),
+        Primitive::String => ValueRange::new(0.0, 64.0),
     }
 }
 
@@ -84,7 +84,6 @@ impl Default for ValueRanges {
             Primitive::F32,
             Primitive::F64,
             Primitive::String,
-            Primitive::Bytes,
         ];
         let mut ranges = Self {
             ranges: BTreeMap::new(),
@@ -101,6 +100,34 @@ impl Default for ValueRanges {
 /// The interface and pool-item selection distributions are not disclosed
 /// by the paper. This reproduction therefore exposes explicit selection
 /// policies instead of pretending to implement a paper probability model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FreshSelectionPolicy {
+    Random,
+    RoundRobin,
+    ShuffleCycle,
+}
+
+impl FreshSelectionPolicy {
+    pub fn parse_cli(value: &str) -> Result<Self, String> {
+        match value {
+            "random" => Ok(Self::Random),
+            "round-robin" => Ok(Self::RoundRobin),
+            "shuffle-cycle" => Ok(Self::ShuffleCycle),
+            other => Err(format!(
+                "unknown fresh selection policy {other}; expected random, round-robin, or shuffle-cycle"
+            )),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Random => "random",
+            Self::RoundRobin => "round-robin",
+            Self::ShuffleCycle => "shuffle-cycle",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct GeneratorConfig {
     /// Number of operator hits applied per mutation call.
@@ -111,6 +138,11 @@ pub struct GeneratorConfig {
     pub array_len_range: std::ops::RangeInclusive<usize>,
     pub interface_selection: SelectionPolicy,
     pub pool_selection: SelectionPolicy,
+    /// If set, every Nth round generates a fresh payload from the interface
+    /// set even when the interesting-payload pool is non-empty. `None`
+    /// preserves the paper-style "mutate from pool once available" loop.
+    pub fresh_generation_period: Option<u64>,
+    pub fresh_selection: FreshSelectionPolicy,
     pub per_type_value_ranges: ValueRanges,
     pub operator_weights: OperatorWeights,
     pub operators_per_type: OperatorsPerType,
@@ -124,6 +156,8 @@ impl Default for GeneratorConfig {
             array_len_range: 0..=8,
             interface_selection: SelectionPolicy::Uniform,
             pool_selection: SelectionPolicy::Uniform,
+            fresh_generation_period: None,
+            fresh_selection: FreshSelectionPolicy::Random,
             per_type_value_ranges: ValueRanges::default(),
             operator_weights: OperatorWeights::default(),
             operators_per_type: OperatorsPerType::default(),
@@ -151,17 +185,29 @@ pub struct PayloadGenerator {
     config: GeneratorConfig,
     base_seed: u64,
     round: u64,
+    fresh_interface_cursor: usize,
+    fresh_interface_order: Vec<usize>,
     rng: StdRng,
 }
 
 impl PayloadGenerator {
     pub fn new(interfaces: Vec<Interface>, config: GeneratorConfig, seed: u64) -> Self {
+        let mut fresh_interface_order = (0..interfaces.len()).collect::<Vec<_>>();
+        match config.fresh_selection {
+            FreshSelectionPolicy::ShuffleCycle => {
+                let mut order_rng = StdRng::seed_from_u64(seed ^ 0xA11C_E5E1_EC71_0A5D);
+                fresh_interface_order.shuffle(&mut order_rng);
+            }
+            FreshSelectionPolicy::Random | FreshSelectionPolicy::RoundRobin => {}
+        }
         Self {
             interfaces,
             pool: PayloadPool::new(),
             config,
             base_seed: seed,
             round: 0,
+            fresh_interface_cursor: 0,
+            fresh_interface_order,
             rng: StdRng::seed_from_u64(seed),
         }
     }
@@ -194,7 +240,9 @@ impl PayloadGenerator {
         self.rng = StdRng::seed_from_u64(round_seed);
         self.round += 1;
 
-        let payload = if self.pool.is_empty() {
+        let should_generate_fresh =
+            self.pool.is_empty() || self.should_generate_fresh_despite_pool();
+        let payload = if should_generate_fresh {
             if self.interfaces.is_empty() {
                 return Err(Error::Unsupported(
                     "no interfaces extracted; run a dry run first".to_string(),
@@ -239,9 +287,23 @@ impl PayloadGenerator {
     }
 
     fn select_interface_index(&mut self) -> Result<usize, Error> {
-        match self.config.interface_selection {
-            SelectionPolicy::Uniform => Ok(self.rng.gen_range(0..self.interfaces.len())),
+        match self.config.fresh_selection {
+            FreshSelectionPolicy::Random => match self.config.interface_selection {
+                SelectionPolicy::Uniform => Ok(self.rng.gen_range(0..self.interfaces.len())),
+            },
+            FreshSelectionPolicy::RoundRobin | FreshSelectionPolicy::ShuffleCycle => {
+                let index = self.fresh_interface_order
+                    [self.fresh_interface_cursor % self.fresh_interface_order.len()];
+                self.fresh_interface_cursor = self.fresh_interface_cursor.wrapping_add(1);
+                Ok(index)
+            }
         }
+    }
+
+    fn should_generate_fresh_despite_pool(&self) -> bool {
+        self.config
+            .fresh_generation_period
+            .is_some_and(|period| period > 0 && self.round.is_multiple_of(period))
     }
 }
 

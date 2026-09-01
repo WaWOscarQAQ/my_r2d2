@@ -101,7 +101,11 @@ cargo run --example nav2_costmap_e2e -- --rounds 25 --seed 7 \
   --round-duration 3.5 --bridge-rate 100 --tsan-log-dir nav2_ws/tsan_reports
 ```
 
-## 8. 第二轮战役（2026-08-21）：TSAN+lcov 合并构建
+## 8. 第二轮战役（2026-08-21）：TSAN+lcov 合并构建（已废弃）
+
+后续复核确认：TSAN 与 gcov/lcov 不再合并使用。若 TSan 报告冲突地址为
+`__gcov0.*` / `__gcov.*`，归类为覆盖率插桩计数器竞争，不作为 Nav2 业务缺陷。
+当前构建脚本已改为 coverage 与 TSAN-only 两套构建。
 
 在「TSAN 与每轮 lcov 分支覆盖同时生效」的目标下重新验证了构建矩阵：
 
@@ -147,3 +151,86 @@ cargo run --example nav2_costmap_e2e -- --rounds 25 --seed 7 \
    （nav2_costmap_2d_core.so 等）全部在 DSO 里。因此进程常驻 + 每轮 dump 的
    模式拿不到目标覆盖；唯一可行形态是每轮重启 costmap（对齐旧 fuzzer 的
    restart_nav2_each_round=true），经用户决策不采纳，回到方案 A。
+
+## 10. 当前落地方案（2026-08-26）：两套构建产物
+
+当前不再让 TSan 与 coverage 共享同一 build/install 目录，也不再在同一 campaign
+里同时传 `--tsan-log-dir` 和 `--lcov-dir`。
+
+构建矩阵：
+
+- coverage profile：`R2D2_PROFILE=coverage`，输出到 `nav2_ws/build`、
+  `nav2_ws/install`、`overlay_ws/build`、`overlay_ws/install`。
+- TSan profile：`R2D2_PROFILE=tsan`，输出到 `nav2_ws/build_tsan`、
+  `nav2_ws/install_tsan`、`overlay_ws/build_tsan`、`overlay_ws/install_tsan`。
+
+运行矩阵：
+
+```bash
+R2D2_PROFILE=coverage ROS_DOMAIN_ID=200 cargo run --example nav2_costmap_e2e -- \
+  --rounds 1000 \
+  --seed-dir config/nav2_seeds --lcov-dir nav2_ws/results
+
+R2D2_PROFILE=tsan ROS_DOMAIN_ID=201 cargo run --example nav2_costmap_e2e -- \
+  --rounds 1000 \
+  --seed-dir config/nav2_seeds --tsan-log-dir nav2_ws/tsan_reports
+```
+
+实测证据：
+
+- TSan 构建后检查 `nav2_ws/build_tsan`、`nav2_ws/install_tsan`、
+  `overlay_ws/build_tsan`、`overlay_ws/install_tsan`，`.gcno/.gcda` 数量为 `0`。
+- coverage profile 的真实 1 轮 fuzz 完成，最终分支覆盖 `26050/150160`，结果在
+  `nav2_ws/results_profile_cov_probe/`。
+- TSan profile 的真实 1 轮 fuzz 完成，benchmark `analyzed=1`，round 1 正常执行，
+  结果在 `nav2_ws/tsan_reports_profile_probe/`。
+- `rg "__gcov|gcov" nav2_ws/tsan_reports_profile_probe` 无输出，说明现有 TSan 报告
+  不是 gcov 计数器竞争。
+
+因此当前分类口径为：
+
+- `__gcov0.*` / `__gcov.*`：只可能来自错误的合并构建，不能作为 Nav2 业务 race。
+- `nav2_ws/src/navigation2/...`、`overlay_ws/src/rcl/...`、`overlay_ws/src/rclcpp/...`：
+  属于当前 TSan-only campaign 可分析的真实源码竞争报告。
+
+## 11. SanitizerCoverage 替代 lcov（2026-08-26）
+
+如果必须在同一 ROS 进程中同时做 TSan race 检测和覆盖反馈，不再使用 gcov/lcov，
+改用 LLVM SanitizerCoverage。当前落地为第三个 profile：
+
+```bash
+R2D2_PROFILE=sancov scripts/build_nav2_ws.sh --sancov --clean
+R2D2_PROFILE=sancov scripts/build_overlay_ws.sh --clean
+R2D2_PROFILE=sancov ROS_DOMAIN_ID=202 cargo run --example nav2_costmap_e2e -- \
+  --rounds 1000 \
+  --seed-dir config/nav2_seeds \
+  --tsan-log-dir nav2_ws/tsan_reports_sancov \
+  --sancov-dir nav2_ws/sancov_results
+```
+
+构建 flags：
+
+- `-fsanitize=thread`
+- `-fsanitize-coverage=trace-pc-guard,pc-table`
+- `-DSANITIZER_COVERAGE_RUN=1`
+
+运行时使用 LLVM sanitizer runtime 的 `.sancov` dump，不再写 gcov 计数器。外部
+signal 会干扰 full Nav2 lifecycle 子进程，因此当前不把每轮覆盖反馈依赖在 signal 上，
+而是在 `r2d2_tracer_core` 的 registration/runtime hook 中低频触发：
+
+- `__sanitizer_cov_dump()`
+- 每 16 个 tracer 事件自动 dump 一次
+- harness 按轮读取 `--sancov-dir` 下新增 `.sancov` PC
+
+每轮写出：
+
+- `rounds/round_xxxxxx/sancov_raw/`：本轮复制的原始 `.sancov` 文件。
+- `rounds/round_xxxxxx/coverage/status.json`：累计 `sancov_covered_pcs` 与本轮增量。
+- `rounds/round_xxxxxx/coverage/packages.json`：按目标 Nav2 包聚合的 PC 覆盖反馈。
+- `summary.json`：最终 fuzz summary 与累计 SanitizerCoverage PC 数。
+
+限制：
+
+- 这不是 lcov `.info`，不能与图片中的 lcov 分支数直接比较。
+- 当前反馈单位是 `.sancov` PC，不是 lcov branch。
+- TSan log 里可能出现 `SanitizerCoverage:` dump 记录；这不是业务 race。

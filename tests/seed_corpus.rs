@@ -119,8 +119,7 @@ fn parse_schedule_rejects_malformed_lines() {
 
 #[test]
 fn loads_committed_seed_corpus() {
-    let fixture_root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/nav2_seeds");
+    let fixture_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/nav2_seeds");
     let interface = laser_scan_interface();
     let seeds =
         load_scan_seeds(&fixture_root.join("scans"), &interface).expect("load committed scans");

@@ -1,0 +1,167 @@
+version: 1
+name: full_stack_bootstrap
+
+# Default full-stack bootstrap.  These replace the old Rust-side hardcoded
+# sends and keep a legal Nav2 context alive before each generated fuzz payload.
+# The generated payload itself still comes from the fuzz loop.
+defaults:
+  delay_after_ms: 200
+
+steps:
+  - label: valid_initial_pose
+    phase: both
+    kind: topic
+    endpoint: /initialpose
+    ros_type: geometry_msgs/msg/PoseWithCovarianceStamped
+    interface: PoseWithCovarianceStamped
+    allow_failure: true
+    payload:
+      header:
+        frame_id: map
+        stamp:
+          sec: 0
+          nanosec: 0
+      pose:
+        covariance:
+          - 0.25
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.25
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.0
+          - 0.06853891909122467
+        pose:
+          position:
+            x: 0.6187454462051392
+            y: -1.2281272411346436
+            z: 0.0
+          orientation:
+            x: 0.0
+            y: 0.0
+            z: -0.8289736246461499
+            w: 0.5592876984531523
+
+  - label: seed_odometry
+    phase: both
+    kind: topic
+    endpoint: /odom
+    ros_type: nav_msgs/msg/Odometry
+    interface: Odometry
+    allow_failure: true
+    payload:
+      header:
+        frame_id: odom
+        stamp:
+          sec: 0
+          nanosec: 0
+      child_frame_id: base_footprint
+      pose:
+        pose:
+          position:
+            x: 0.6187454462051392
+            y: -1.2281272411346436
+            z: 0.0
+          orientation:
+            x: 0.0
+            y: 0.0
+            z: -0.8289736246461499
+            w: 0.5592876984531523
+      twist:
+        twist:
+          linear:
+            x: 0.0
+            y: 0.0
+            z: 0.0
+          angular:
+            x: 0.0
+            y: 0.0
+            z: 0.0
+
+  - label: context_clear_scan
+    phase: round
+    kind: topic
+    endpoint: /scan
+    ros_type: sensor_msgs/msg/LaserScan
+    interface: LaserScan
+    allow_failure: true
+    delay_after_ms: 100
+    payload:
+      header:
+        frame_id: base_scan
+        stamp:
+          sec: 0
+          nanosec: 0
+      angle_min: -1.5707963267948966
+      angle_max: 1.5707963267948966
+      angle_increment: 0.08975979010256552
+      time_increment: 0.0
+      scan_time: 0.1
+      range_min: 0.12
+      range_max: 3.5
+      ranges:
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+        - 3.5
+      intensities: []

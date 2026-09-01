@@ -8,6 +8,14 @@ use std::path::{Path, PathBuf};
 struct EnvYamlFile {
     #[serde(default)]
     env: HashMap<String, Value>,
+    #[serde(default)]
+    profiles: HashMap<String, EnvYamlProfile>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct EnvYamlProfile {
+    #[serde(default)]
+    env: HashMap<String, Value>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,8 +39,16 @@ impl YamlEnv {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| repo_root.to_path_buf());
 
-        let values = parsed
-            .env
+        let profile = std::env::var("R2D2_PROFILE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "coverage".to_string());
+        let mut raw_values = parsed.env;
+        if let Some(profile_values) = parsed.profiles.get(&profile) {
+            raw_values.extend(profile_values.env.clone());
+        }
+
+        let values = raw_values
             .into_iter()
             .filter_map(|(key, value)| {
                 yaml_scalar_to_string(value)
@@ -80,9 +96,17 @@ fn is_path_key(key: &str) -> bool {
     matches!(
         key,
         "R2D2_NAV2_WS"
+            | "R2D2_NAV2_SOURCE_ROOT"
+            | "R2D2_NAV2_BUILD_BASE"
+            | "R2D2_NAV2_INSTALL_BASE"
+            | "R2D2_NAV2_LOG_BASE"
+            | "R2D2_NAV2_INSTALL_SETUP"
+            | "R2D2_OVERLAY_BUILD_BASE"
+            | "R2D2_OVERLAY_INSTALL_BASE"
+            | "R2D2_OVERLAY_LOG_BASE"
+            | "R2D2_OVERLAY_INSTALL_SETUP"
             | "R2D2_ROS_SETUP"
             | "R2D2_PYTHON_EXECUTABLE"
-            | "R2D2_COSTMAP_PARAMS"
             | "R2D2_SHM_PATH"
             | "R2D2_FUZZ_SOURCE"
     )

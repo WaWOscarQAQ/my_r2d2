@@ -1,6 +1,12 @@
-# ROS 2 接口矩阵与 nav2_costmap_2d 落地清单
+# ROS 2 接口矩阵与 Nav2 落地清单
 
 日期：2026-08-23
+
+> 当前口径（2026-09-01）：本文前半部分仍作为 ROS 2 接口背景保留；早期
+> `nav2_costmap_2d` costmap-only 记录已不是正式运行路线。正式路线只保留
+> Nav2 full-stack 合并 harness：以论文 callback-trace 方法为核心，输入面覆盖
+> topic / service / action / safe parameter profile。当前完整输入清单见
+> `docs/research/nav2_fuzzer_current_inputs.md`。
 
 ## 1. 官方 ROS 2 接口矩阵
 
@@ -33,12 +39,15 @@ ROS 2 官方文档把通信接口分成三类：
 
 ## 2. 本轮实现边界
 
-论文复现边界仍按 topic/service 执行，不额外把 action 纳入 fuzz 输入面。
+当前正式运行边界不再拆成“论文路径”和“Jazzy full-stack 路径”，也不再停留在
+costmap-only topic/service 子集。合并路线的含义是：
 
-所以本轮“全接口矩阵”的含义是：
-
-1. 先按 ROS 2 官方文档确认接口类别只有 topic / service / action 三大类。
-2. 再对当前真实目标 `nav2_costmap_2d`，把与论文边界一致的 topic / service 输入面补齐。
+1. 按 ROS 2 官方文档确认接口类别包含 topic / service / action。
+2. 在同一个 Nav2 full-stack harness 中使用论文的 dry run / benchmark /
+   callback-trace oracle / new-state pool 主循环。
+3. 输入面扩展为真实可发送的 topic / service / action，以及经过 safe profile
+   限定并轮后 restore 的 parameter。
+4. coverage attribution 只进入报告，不进入调度器。
 
 ## 3. 官方 Nav2 文档可支撑的 costmap 输入面
 
@@ -109,6 +118,8 @@ ROS 2 官方文档把通信接口分成三类：
 - 新增：
   - `Ros2TopicSender`
   - `Ros2ServiceSender`
+  - `Ros2ActionSender`
+  - safe parameter sender helpers
 
 ### 4.3 e2e harness
 
@@ -117,8 +128,9 @@ ROS 2 官方文档把通信接口分成三类：
   - dry run 从 `/opt/ros/jazzy/share` 提取官方接口
   - benchmark 前先执行真实 ready barrier：等待 `/costmap` 出现在 ROS graph，等待 lifecycle 可查询，必要时依次 `configure -> activate`，再等待必需 service 与参数服务 ready，最后等待 registration trace 收敛
   - 只有 ready barrier 通过后，才执行 dry run 绑定提取和 benchmark
-  - 每轮按接口类型分发到 topic/service sender
-  - 启动后先 bootstrap `/map`，确保 static layer 真实接线
+  - 每轮按接口类型分发到 topic/service/action/parameter sender
+  - readiness sequence 只发布基础 pose/odom/scan 来维持合法状态，不写固定
+    `/goal_pose` 或 coverage-path scripting
 
 ### 4.4 nav2 真正接线
 
@@ -154,7 +166,10 @@ ROS 2 官方文档把通信接口分成三类：
 5. `/clear_around_pose_costmap` -> `nav2_msgs/srv/ClearCostmapAroundPose`
 6. `/clear_entirely_costmap` -> `nav2_msgs/srv/ClearEntireCostmap`
 
-总计：4 个 topic + 6 个 service。
+这份清单是早期 costmap-only 子集。当前 full-stack dry run 的正式输入面是
+67 个 binding：23 topic、26 service、11 action、7 safe parameter profile。
+完整端点列表以 `docs/research/nav2_fuzzer_current_inputs.md` 和运行日志里的
+`dry run: extracted ... full-stack interfaces` 为准。
 
 ## 6. 2026-08-23 实机验证
 
@@ -175,7 +190,7 @@ ROS_DOMAIN_ID=191 cargo run --example nav2_costmap_e2e -- --benchmark-seconds 5 
 实测结果：
 
 - ready barrier 通过，打印 `startup: ready barrier passed`
-- dry run 成功抽取 34 个真实 costmap 接口
-- benchmark 5 秒内成功完成 topic / service / parameter 三类真实发送
+- dry run 成功抽取当时目标配置下的真实接口
+- benchmark 5 秒内成功完成真实 ROS 发送
 - 本轮未再出现 `Node not found`
 - 运行摘要为 `crashes=0 new_states=0 invalid_traces=0 empty_rounds=0`

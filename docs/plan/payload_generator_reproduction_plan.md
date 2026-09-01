@@ -1,5 +1,7 @@
 # Payload Generator 复现计划
 
+> 2026-08-31 更新：本文是早期 payload generator 复现计划，原先“只覆盖 topic/service、不扩展 action、移除 `Kind::Action`”的口径已过期。当前正式路线已收敛为单一 full-stack Nav2 合并路线：以论文 callback-trace 方法为核心，输入面覆盖 topic/service/action/safe parameter profile；warm-up 只允许 readiness，不做 coverage-path scripting。
+>
 > 唯一技术依据：Yuheng Shen et al., *Enhancing ROS System Fuzzing through Callback Tracing*, ISSTA 2024, DOI: `10.1145/3650212.3652111`，第 4.2.2 节 Guided Payload Synthesis 与第 4.3 节 Implementation。
 >
 > 本文档与 `r2d2_strict_reproduction_plan.md` 阶段 G、阶段 H 保持一致。论文未披露的信息统一列为缺口并标注为 reproduction choice，不擅自补齐。
@@ -13,7 +15,7 @@
 - 论文第 5.1 节：interface extractor 提取全部 interface specification 后，payload generator 才能为 SUT 构造 payload。
 - `r2d2_strict_reproduction_plan.md` 阶段 G：给出 6 条 payload 生成规则、5 条验收条件与未披露参数清单。
 - `r2d2_strict_reproduction_plan.md` 阶段 H：规定 Rust 组件的每轮执行顺序。
-- `r2d2_strict_reproduction_plan.md` 第 1.2 节：输入接口只覆盖 topic 与 service，不扩展 action；fuzzing guidance 只用 callback trace，不使用 code coverage。
+- 当前 Nav2 复现实验口径：调度指导只使用 callback trace；coverage attribution 只在报告阶段写入，不进入调度器；输入面在 full-stack 路线中覆盖 topic/service/action/safe parameter profile。
 
 ### 1.2 范围
 
@@ -61,7 +63,7 @@
 
 ### 3.2 修改
 
-- `src/interface_extractor.rs`：移除 `Kind::Action`；将 `Field` 的平面 `ty` 字符串扩展为递归类型树；`Interface` 增加关联 data files 信息。
+- `src/interface_extractor.rs`：保留 `Kind::Action` 并加入统一 kind 文本映射；将 `Field` 的平面 `ty` 字符串扩展为递归类型树；`Interface` 增加关联 data files 信息。
 - `src/lib.rs`：注册新增模块。
 - `tests/interface_extractor.rs`：随 interface 模型扩展更新既有断言。
 - `README.md`：更新模块边界说明。
@@ -75,7 +77,7 @@
 - 现有 `Field` 只有 `name` 与 `ty` 两个字符串字段，无法表达嵌套消息与数组，也就无法支撑论文要求的"按 data files 递归变异"。
 - 将字段类型改为引用类型树节点 `TypeNode`：叶子节点为基础类型 `Primitive`（bool、有符号与无符号整数族、浮点、string、byte array），内部节点为复合类型 `Composite`（嵌套消息与定长/变长数组）。
 - `Interface` 增加 `data_files` 字段，保存该 interface 关联的 data file 定义（.msg 或 .srv 源与解析后的类型树），作为递归生成与变异的依据。
-- 移除 `Kind::Action`，与 `r2d2_strict_reproduction_plan.md` 第 1.2 节"只覆盖 topic 与 service"保持一致。
+- 保留 `Kind::Action`，因为当前 full-stack Nav2 路线已将 action 作为真实 ROS 输入面的一部分；warm-up sequence 仍只允许 topic readiness，避免把 action 变成固定路径脚本。
 - `Extractor` trait 的签名保持"返回 `Vec<Interface>`"不变，使既有 mock 测试只需做最小更新。
 
 ### 4.2 Payload 数据模型

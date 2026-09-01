@@ -76,7 +76,7 @@ fn jazzy_share_root() -> std::path::PathBuf {
     Path::new("/opt/ros/jazzy/share").to_path_buf()
 }
 
-fn nested<'a>(ty: &'a TypeNode) -> &'a [my_r2d2::interface_extractor::Field] {
+fn nested(ty: &TypeNode) -> &[my_r2d2::interface_extractor::Field] {
     let TypeNode::Nested(fields) = ty else {
         panic!("expected nested node, got {ty:?}");
     };
@@ -261,9 +261,12 @@ fn missing_file_reports_canonicalize_error() {
 }
 
 #[test]
-fn non_msg_srv_extension_is_rejected() {
+fn non_interface_extension_is_rejected() {
     let err = extract_err("broken/NotInterface.txt");
-    assert!(err.contains("is not a .msg or .srv file"), "got: {err}");
+    assert!(
+        err.contains("is not a .msg, .srv, or .action file"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -349,6 +352,9 @@ fn parses_default_value_fixture() {
     let field = find(&interface.fields, "x");
     assert_eq!(field.ty, TypeNode::Primitive(Primitive::I32));
     assert_eq!(field.default_value, Some(Literal::I32(5)));
+    let enabled = find(&interface.fields, "enabled");
+    assert_eq!(enabled.ty, TypeNode::Primitive(Primitive::Bool));
+    assert_eq!(enabled.default_value, Some(Literal::Bool(false)));
 }
 
 #[test]

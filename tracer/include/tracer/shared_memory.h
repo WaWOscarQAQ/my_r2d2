@@ -13,10 +13,10 @@ struct SharedHeader {
     std::uint32_t magic;
     std::uint32_t version;
     std::uint64_t shm_size;
-    std::uint64_t registration_capacity;
-    std::uint64_t registration_records_offset;
-    std::uint64_t runtime_capacity;
-    std::uint64_t runtime_records_offset;
+    std::uint64_t reg_capacity;
+    std::uint64_t reg_records_offset;
+    std::uint64_t rt_capacity;
+    std::uint64_t rt_records_offset;
 };
 
 static_assert(sizeof(SharedHeader) == 48, "layout must match the Rust reader");

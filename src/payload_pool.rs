@@ -11,15 +11,10 @@
 use crate::payload::Payload;
 use rand::Rng;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SelectionPolicy {
+    #[default]
     Uniform,
-}
-
-impl Default for SelectionPolicy {
-    fn default() -> Self {
-        Self::Uniform
-    }
 }
 
 impl SelectionPolicy {

@@ -71,7 +71,6 @@
 - `R2D2_PYTHON_EXECUTABLE`
 - `R2D2_SHM_PATH`
 - `ROS_DOMAIN_ID`
-- `R2D2_COSTMAP_PARAMS`
 - `R2D2_FUZZ_SOURCE`
 
 验收标准：
@@ -221,7 +220,8 @@
 
 当前剩余边界：
 
-- 真实 sender 目前只覆盖 `/scan` 的 LaserScan 注入，尚未泛化到更多 topic/service。
+- 真实 sender 现在已覆盖 topic/service/action/safe parameter profile；剩余工作是把
+  当前 Nav2 full-stack binding 进一步泛化为完整 ROS graph 自动发现。
 - crash/sanitizer 结果仍主要由 example/harness 汇总，未形成统一归档接口。
 - 更大范围的输入面扩展已顺延到 B5。
 

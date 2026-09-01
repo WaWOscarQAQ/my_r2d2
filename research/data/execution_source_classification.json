@@ -1,0 +1,245 @@
+{
+  "method_version": "2026-08-29-source-class-v2",
+  "classification_groups": [
+    {
+      "project": "rmf_ros2",
+      "source_class": "lifecycle",
+      "source_class_rule": "对象、执行器或异步工作的启动、停止、取消、销毁、回收或所有权终止是形成 race 的必要条件。",
+      "self_created_thread_evidence": "该类按优先级先于 worker_thread；即使异步工作运行在项目拥有的 RxCpp worker 上，只要核心缺陷是停止/销毁/对象回收，仍归 lifecycle。",
+      "source_class_notes": "包括异步规划捕获对象的所有权、RxCppExecutor 启停、测试/动作 teardown、WebSocket stop 及 Planning 捕获对象寿命。",
+      "race_ids": ["RMF-2020-002", "RMF-2020-003", "RMF-2020-004", "RMF-2021-007", "RMF-2021-008", "RMF-2021-009", "RMF-2021-012", "RMF-2021-016", "RMF-2021-018", "RMF-2022-020", "RMF-2025-028", "RMF-2025-029"]
+    },
+    {
+      "project": "rmf_ros2",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，项目显式拥有的 RxCpp worker/event-loop/new-thread 调度执行是形成 race 的必要参与者。",
+      "self_created_thread_evidence": "rmf_ros2 代码显式创建或保存 rxcpp::schedulers::worker，并以 make_event_loop/create_worker 或 worker.schedule 串行化修复；vendored rx-newthread.hpp 直接管理生产者/消费者线程。",
+      "source_class_notes": "RxCpp worker 被视为项目显式拥有的线程型调度器；ROS Executor 或 DDS 内部线程本身不满足本类。",
+      "race_ids": ["RMF-2021-011", "RMF-2021-013", "RMF-2021-014", "RMF-2021-015", "RMF-2021-017", "RMF-2022-019", "RMF-2023-022", "RMF-2025-030"]
+    },
+    {
+      "project": "rmf_ros2",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，两个 ROS/Rx/动作/状态回调或回调与普通调用路径的并发是主要触发源。",
+      "self_created_thread_evidence": "未发现项目显式创建的专用线程是这些实例成立的必要条件；并发来自回调执行或外部调用线程。",
+      "source_class_notes": "callback 仍另有独立 callback_race 标签；本字段只表示互斥主类。",
+      "race_ids": ["RMF-2020-001", "RMF-2020-005", "RMF-2021-006", "RMF-2021-010", "RMF-2022-021", "RMF-2024-023", "RMF-2024-024", "RMF-2024-025", "RMF-2025-026", "RMF-2025-027", "RMF-2025-031"]
+    },
+    {
+      "project": "Navigation2",
+      "source_class": "lifecycle",
+      "source_class_rule": "对象/回调资源的创建、替换、清理、销毁、停机或内存回收是 race 的核心条件。",
+      "self_created_thread_evidence": "该类优先于 worker_thread；Costmap 自建线程或 action worker 可能参与，但若缺陷核心为 pointee 回收、cleanup 或 callback 注销，则归 lifecycle。",
+      "source_class_notes": "包括 shared_ptr/pointee 替换、LifecycleNode activate/deactivate/cleanup，以及动态参数 callback 与析构/注销的 20 个独立位置。",
+      "race_ids": ["NAV-2025-002", "NAV-2021-007", "NAV-2021-010", "NAV-2022-013", "NAV-2022-014", "NAV-2022-015", "NAV-2022-016", "NAV-2023-021", "NAV-2023-027", "NAV-2024-028", "NAV-2024-029", "NAV-2024-031", "NAV-2024-032", "NAV-2024-033", "NAV-2024-034", "NAV-2024-035", "NAV-2024-036", "NAV-2024-037", "NAV-2024-038", "NAV-2024-039", "NAV-2024-040", "NAV-2024-041", "NAV-2024-042", "NAV-2024-043", "NAV-2024-044", "NAV-2024-045", "NAV-2024-046", "NAV-2024-047", "NAV-2024-048", "NAV-2024-049", "NAV-2024-050", "NAV-2024-051", "NAV-2024-053"]
+    },
+    {
+      "project": "Navigation2",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，Nav2 显式创建/拥有的 std::thread、std::async(std::launch::async) action worker 或 costmap map-update thread 是必要参与者。",
+      "self_created_thread_evidence": "SimpleActionServer 明确用 std::async(std::launch::async) 执行 work；Costmap2DROS 明确拥有 map_update_thread_，并由该线程运行 mapUpdateLoop。",
+      "source_class_notes": "普通 ROS Executor 线程不计；只有代码中明确拥有的 action/costmap/控制执行线程计入。",
+      "race_ids": ["NAV-2020-001", "NAV-2020-003", "NAV-2020-004", "NAV-2020-005", "NAV-2023-020", "NAV-2023-022", "NAV-2023-023", "NAV-2023-024", "NAV-2023-025", "NAV-2023-026", "NAV-2024-030", "NAV-2024-054", "NAV-2026-055", "NAV-2026-057", "NAV-2026-058", "NAV-2026-059", "NAV-2026-060", "NAV-2026-061", "NAV-2026-062", "NAV-2026-063", "NAV-2026-064", "NAV-2026-065", "NAV-2026-066", "NAV-2026-067"]
+    },
+    {
+      "project": "Navigation2",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，ROS subscription/service/timer/action-result 等回调之间的并发是主要触发源。",
+      "self_created_thread_evidence": "这些实例不依赖项目显式创建的专用线程；其并发可由 ROS Executor 的 callback 调度解释。",
+      "source_class_notes": "包括 AMCL、LayeredCostmap、CostmapLayer 与 BT action result/goal response 的回调并发。",
+      "race_ids": ["NAV-2021-006", "NAV-2021-008", "NAV-2021-009", "NAV-2022-011", "NAV-2022-012", "NAV-2023-017", "NAV-2023-018", "NAV-2023-019", "NAV-2024-052"]
+    },
+    {
+      "project": "Navigation2",
+      "source_class": "others",
+      "source_class_rule": "不满足 lifecycle、自建 worker 或 callback 主触发源的剩余并发。",
+      "self_created_thread_evidence": "两个普通转换调用方并发调用 Humble 的 toCostmap2D；现有证据不能归因于项目自建线程或 ROS callback。",
+      "source_class_notes": "保守兜底类。",
+      "race_ids": ["NAV-2026-056"]
+    },
+    {
+      "project": "Autoware Universe",
+      "source_class": "lifecycle",
+      "source_class_rule": "模块析构、对象替换或共享存储回收与仍在执行的 callback 重叠。",
+      "self_created_thread_evidence": "生命周期/对象回收是核心，按优先级先于 callback 或 worker_thread。",
+      "source_class_notes": "GoalPlanner 析构与规划 callback，以及 costmap 存储同步/替换形成的对象寿命 race。",
+      "race_ids": ["AWU-2023-003", "AWU-2025-001"]
+    },
+    {
+      "project": "Autoware Universe",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，项目显式创建的 detached diagnostics thread 与 sensor callback 并发。",
+      "self_created_thread_evidence": "PR #5532 明确删除 thread processing，并限制 state_ptr_ 只由 sensor callback 访问以保证 thread safety。",
+      "source_class_notes": "这是 Autoware Universe 样本中唯一满足严格自建 worker 定义的实例。",
+      "race_ids": ["AWU-2023-004"]
+    },
+    {
+      "project": "Autoware Universe",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，不同 ROS subscription、timer、service 或 callback group 并发访问共享状态。",
+      "self_created_thread_evidence": "未发现项目显式创建的专用 OS 线程是这些实例成立的必要条件；后台 timer 仍按 ROS callback 而非 worker thread 处理。",
+      "source_class_notes": "ROS timer callback 即使在后台执行，也不等于项目自建线程。",
+      "race_ids": ["AWU-2022-001", "AWU-2022-002", "AWU-2022-003", "AWU-2022-004", "AWU-2022-005", "AWU-2023-001", "AWU-2023-002", "AWU-2023-005", "AWU-2023-006", "AWU-2024-001", "AWU-2024-002", "AWU-2024-003", "AWU-2024-004", "AWU-2024-005", "AWU-2024-006", "AWU-2024-007", "AWU-2024-008", "AWU-2024-009", "AWU-2024-010", "AWU-2024-011", "AWU-2024-012", "AWU-2024-013", "AWU-2024-014", "AWU-2026-001", "AWU-2026-002", "AWU-2026-003", "AWU-2026-004", "AWU-2026-005", "AWU-2026-006"]
+    },
+    {
+      "project": "ros2_control",
+      "source_class": "lifecycle",
+      "source_class_rule": "shutdown、deactivate、interface release 或插件/节点 teardown 与仍在执行的 timer/controller callback 重叠。",
+      "self_created_thread_evidence": "异步 controller 的 dedicated thread 可能参与，但核心缺陷是 shutdown/deactivate 后执行仍存活，因此按优先级归 lifecycle。",
+      "source_class_notes": "覆盖 rqt_controller_manager 三个 timer、ControllerManager shutdown 以及 semantic component release_interfaces。",
+      "race_ids": ["R2C-2026-001", "R2C-2026-002", "R2C-2026-003", "R2C-2025-002", "R2C-2026-004", "R2C-2026-005"]
+    },
+    {
+      "project": "ros2_control",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，ControllerManager 显式创建/拥有的实时 read-update-write loop 或 async-controller dedicated thread 与非实时路径并发。",
+      "self_created_thread_evidence": "ros2_control_node.cpp 显式创建 cm_thread；异步 controller 文档说明每个异步 controller 在 dedicated thread 上运行。",
+      "source_class_notes": "Executor 中的 subscription/service callback 只作为另一参与方；分类依据是项目拥有的控制循环线程不可缺少。",
+      "race_ids": ["R2C-2023-001", "R2C-2024-001", "R2C-2023-002", "R2C-2023-003"]
+    },
+    {
+      "project": "ros2_control",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，多个 service callback/客户端重试导致服务器 callback 重叠。",
+      "self_created_thread_evidence": "未发现项目显式创建的专用线程是这些事务重叠成立的必要条件。",
+      "source_class_notes": "包括并发 spawner 的 load/configure/activate 事务和 configure 超时重试。",
+      "race_ids": ["R2C-2024-002", "R2C-2025-001"]
+    },
+    {
+      "project": "ros2_control",
+      "source_class": "others",
+      "source_class_rule": "不满足 lifecycle、自建 worker 或 callback 主触发源的剩余并发。",
+      "self_created_thread_evidence": "spawner 进程与 controller-manager 启动/服务就绪之间的跨进程顺序竞态。",
+      "source_class_notes": "这是广义 race/order race，并非严格 C++ data race。",
+      "race_ids": ["R2C-2022-001"]
+    },
+    {
+      "project": "SLAM Toolbox",
+      "source_class": "lifecycle",
+      "source_class_rule": "析构、deactivate 或运行时对象移除/回收与仍在执行的 visualization/scan/callback 路径重叠。",
+      "self_created_thread_evidence": "SLAM Toolbox 显式拥有 boost::thread，但这些实例的核心是线程停止/资源回收边界，故按优先级归 lifecycle。",
+      "source_class_notes": "覆盖 SensorManager teardown 和 deserializePoseGraph 移除 Dataset-backed 对象。",
+      "race_ids": ["ST-2024-005", "ST-2026-006", "ST-2026-007"]
+    },
+    {
+      "project": "SLAM Toolbox",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，项目显式创建的 boost::thread/background run thread 与 callback 或其他 worker 并发。",
+      "self_created_thread_evidence": "SlamToolbox 将 publishTransformLoop/publishVisualizations 放入自有 boost::thread；SynchronousSlamToolbox 拥有后台 run 线程和 scan queue。",
+      "source_class_notes": "与 ROS Executor 管理 callback 的线程严格区分。",
+      "race_ids": ["ST-2022-003", "ST-2022-004", "ST-2026-008"]
+    },
+    {
+      "project": "SLAM Toolbox",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，service/initial-pose callback 与 laser scan callback 直接并发。",
+      "self_created_thread_evidence": "缺陷由 callback 间缺少同一 smapper_mutex_ 解释，不要求项目自建线程参与。",
+      "source_class_notes": "两个独立 callback 入口访问同一 Karto localization running-scan buffer。",
+      "race_ids": ["ST-2021-001", "ST-2021-002"]
+    },
+    {
+      "project": "MoveIt 2",
+      "source_class": "lifecycle",
+      "source_class_rule": "对象清空/回收或 ROS/RMW shutdown 与仍在执行的使用路径重叠。",
+      "self_created_thread_evidence": "TrajectoryExecutionManager 存在项目拥有的执行线程，但 M2-2025-001 的核心是 trajectories_ 及其 pointee 被 clear 时仍被使用；M2-2026-001 是 static node 与 RMW shutdown 的寿命边界，故优先归 lifecycle。",
+      "source_class_notes": "覆盖 trajectory clear/use 和静态 logger node 销毁两个独立生命周期问题。",
+      "race_ids": ["M2-2025-001", "M2-2026-001"]
+    },
+    {
+      "project": "MoveIt 2",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，MoveIt 显式创建/拥有的 scene-publishing、collision-monitor 或 Servo loop thread 是必要参与者。",
+      "self_created_thread_evidence": "PlanningSceneMonitor 拥有 scenePublishingThread；CollisionMonitor/Servo 使用专用执行线程；ServoNode 源码明确以 std::thread(&ServoNode::servoLoop, this) 创建 servo_loop_thread_。",
+      "source_class_notes": "Executor callback 可能作为另一参与方，但主类依据是 MoveIt 自建线程不可缺少。",
+      "race_ids": ["M2-2020-001", "M2-2023-002", "M2-2024-001"]
+    },
+    {
+      "project": "MoveIt 2",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，executor/subscription/service/action callback 的重叠是主要触发源。",
+      "self_created_thread_evidence": "这些实例可由 callback 与 WaitSet/普通调用路径或多个 callback 的并发解释，不要求 MoveIt 显式创建专用线程。",
+      "source_class_notes": "包括 RDF loader WaitSet、MoveGroupInterface executor ownership、controller rediscovery 和 sequence action callback group。",
+      "race_ids": ["M2-2022-001", "M2-2022-002", "M2-2023-001", "M2-2024-002"]
+    },
+    {
+      "project": "MoveIt 2",
+      "source_class": "others",
+      "source_class_rule": "不满足 lifecycle、自建 worker 或 callback 主触发源的剩余并发。",
+      "self_created_thread_evidence": "两个 RViz display 初始化线程竞争共享 rclcpp::Node/参数声明；现有证据不能证明线程由 MoveIt 项目代码显式创建。",
+      "source_class_notes": "广义复合原子性 race，非严格 C++ data race。",
+      "race_ids": ["M2-2021-001"]
+    },
+    {
+      "project": "robot_localization",
+      "source_class": "callback",
+      "source_class_rule": "timer、subscription、service/configuration callback 之间的状态机顺序窗口是主要触发源。",
+      "self_created_thread_evidence": "未发现 robot_localization 显式创建的专用 OS 线程是这三个问题成立的必要条件；并发来自 ROS callback 调度。",
+      "source_class_notes": "三个实例均为开发者确认的 callback order race，而非已证明的严格 C++ data race。",
+      "race_ids": ["RL-2023-001", "RL-2025-002", "RL-2025-003"]
+    },
+    {
+      "project": "rclcpp",
+      "source_class": "lifecycle",
+      "source_class_rule": "对象、Context、listener、callback target、状态机或异步工作的初始化、停止、重置、fini、析构和回收是形成 race 的必要条件。",
+      "self_created_thread_evidence": "该类按优先级先于 worker_thread；即使 executor 或内部线程参与，只要核心冲突发生在 init/fini、stop/reset 或对象销毁边界，仍归 lifecycle。",
+      "source_class_notes": "覆盖 TimeSource、EventHandler、ClientGoalHandle、Context/logging、Lifecycle State/Node 以及 middleware listener teardown。",
+      "race_ids": ["RCL-2021-007", "RCL-2023-016", "RCL-2021-046", "RCL-2021-047", "RCL-2024-025", "RCL-2020-003", "RCL-2020-004", "RCL-2021-011", "RCL-2021-012", "RCL-2023-017", "RCL-2022-039", "RCL-2022-040", "RCL-2022-041", "RCL-2026-036", "RCL-2026-037", "RCL-2024-024"]
+    },
+    {
+      "project": "rclcpp",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，rclcpp Executor、spinner、publisher 或测试代码显式创建和拥有的工作线程是冲突的必要参与者。",
+      "self_created_thread_evidence": "这些实例由 MultiThreadedExecutor/EventsExecutor worker、显式 spinner/future/publisher worker 或测试 worker 并发执行；符合项目代码自行创建或拥有线程的定义。",
+      "source_class_notes": "普通外部 API 调用线程不计入；只有 rclcpp 或其仓库测试代码明确拥有的 worker/spinner 才归入本类。",
+      "race_ids": ["RCL-2020-005", "RCL-2021-009", "RCL-2023-014", "RCL-2023-021", "RCL-2025-026", "RCL-2026-027", "RCL-2024-020", "RCL-2026-030", "RCL-2026-031", "RCL-2026-032", "RCL-2026-033", "RCL-2026-038", "RCL-2020-043", "RCL-2021-006", "RCL-2021-010", "RCL-2026-034", "RCL-2020-044", "RCL-2020-045", "RCL-2024-022", "RCL-2024-023"]
+    },
+    {
+      "project": "rclcpp",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，timer、subscription、parameter、statistics 或 executor callback 与另一回调/普通调用路径的并发是主要触发源。",
+      "self_created_thread_evidence": "这些实例不要求 rclcpp 显式拥有专用工作线程；回调调度和普通调用路径的重叠即可形成冲突。",
+      "source_class_notes": "包括 clock/statistics/parameter 回调以及测试中的 timer/subscription callback 冲突。",
+      "race_ids": ["RCL-2020-001", "RCL-2020-002", "RCL-2023-015", "RCL-2024-018", "RCL-2024-019", "RCL-2026-028", "RCL-2026-029", "RCL-2021-008", "RCL-2023-013", "RCL-2022-042"]
+    },
+    {
+      "project": "rclcpp",
+      "source_class": "others",
+      "source_class_rule": "不满足 lifecycle、自建 worker 或 callback 主来源的普通并发 API 调用。",
+      "self_created_thread_evidence": "两个 async_send_goal 调用方来自普通外部线程；没有证据表明 ROS callback 或 rclcpp 自建 worker 是 race 成立的必要条件。",
+      "source_class_notes": "保守兜底类。",
+      "race_ids": ["RCL-2026-035"]
+    },
+    {
+      "project": "rosbag2",
+      "source_class": "lifecycle",
+      "source_class_rule": "播放器、缓存消费者或异步 flush/split worker 的 stop、resume、start、restart、销毁或替换是形成 race 的必要条件。",
+      "self_created_thread_evidence": "该类按优先级先于 worker_thread；虽然 playback/cache worker 为项目自建线程，但核心冲突位于启停和工作对象替换边界。",
+      "source_class_notes": "覆盖 PlayerProgressBar 控制操作、CacheConsumer start/stop 和 MessageCache split-flush 重启。",
+      "race_ids": ["RB2-2025-015", "RB2-2025-016", "RB2-2026-018", "RB2-2026-019", "RB2-2024-008", "RB2-2025-012", "RB2-2025-013", "RB2-2026-017", "RB2-2026-020"]
+    },
+    {
+      "project": "rosbag2",
+      "source_class": "worker_thread",
+      "source_class_rule": "排除 lifecycle 后，Recorder/Writer 所拥有的 topic-discovery 或写入工作线程与消息 callback/元数据路径并发。",
+      "self_created_thread_evidence": "rosbag2 的录制、发现和存储流程显式运行后台 discovery/writer 工作；这些线程与 subscription callback 的并发是冲突的必要参与者。",
+      "source_class_notes": "覆盖 Writer、SQLite 与 MCAP 的数据库及主题元数据容器。",
+      "race_ids": ["RB2-2020-002", "RB2-2021-003", "RB2-2021-004", "RB2-2024-009", "RB2-2024-010", "RB2-2024-011", "RB2-2021-005", "RB2-2022-007"]
+    },
+    {
+      "project": "rosbag2",
+      "source_class": "callback",
+      "source_class_rule": "排除 lifecycle 与自建 worker 后，Recorder subscription callback 与普通测试读取路径的并发是主要触发源。",
+      "self_created_thread_evidence": "该实例不依赖 rosbag2 专用后台 worker；subscription callback 与测试线程重叠即可形成 vector 读写冲突。",
+      "source_class_notes": "当前严格样本中仅 MockSequentialWriter messages_ 实例属于本类。",
+      "race_ids": ["RB2-2025-014", "RB2-2020-001"]
+    },
+    {
+      "project": "rosbag2",
+      "source_class": "others",
+      "source_class_rule": "不满足 lifecycle、自建 worker 或 callback 主来源的剩余并发。",
+      "self_created_thread_evidence": "当前 rosbag2 严格样本没有需要使用兜底类的实例。",
+      "source_class_notes": "保留空组以明确四类覆盖。",
+      "race_ids": ["RB2-2022-006"]
+    }
+  ]
+}

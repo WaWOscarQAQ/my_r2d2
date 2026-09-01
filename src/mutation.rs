@@ -82,7 +82,7 @@ impl Default for OperatorsPerType {
         Self {
             primitive: vec![OpKind::Flip, OpKind::Boundary, OpKind::Resample],
             string: vec![OpKind::Resize, OpKind::ByteEdit, OpKind::Resample],
-            array: vec![OpKind::Resize, OpKind::Resample],
+            array: vec![OpKind::Resize, OpKind::ByteEdit, OpKind::Resample],
             nested: vec![OpKind::Resample],
         }
     }
@@ -245,10 +245,6 @@ fn generate_primitive(
             let len = len_range(primitive, ty.string_bound(), config, rng);
             Value::String(random_printable(rng, len))
         }
-        Primitive::Bytes => {
-            let len = len_range(primitive, None, config, rng);
-            Value::Bytes(random_bytes(rng, len))
-        }
     }
 }
 
@@ -292,10 +288,6 @@ fn random_printable(rng: &mut impl Rng, len: usize) -> String {
     (0..len)
         .map(|_| rng.gen_range(0x20u8..=0x7e) as char)
         .collect()
-}
-
-fn random_bytes(rng: &mut impl Rng, len: usize) -> Vec<u8> {
-    (0..len).map(|_| rng.r#gen()).collect()
 }
 
 /// Applies operator hits at randomly chosen nodes of the value tree.
@@ -352,6 +344,10 @@ fn walk_paths(
     path: &mut Vec<usize>,
     out: &mut Vec<Vec<usize>>,
 ) {
+    let mut ty = ty;
+    while let TypeNode::Constrained(inner, _) = ty {
+        ty = inner;
+    }
     out.push(path.clone());
     if depth >= max_depth {
         return;
@@ -370,9 +366,6 @@ fn walk_paths(
                 walk_paths(child, element, depth + 1, max_depth, path, out);
                 path.pop();
             }
-        }
-        (value, TypeNode::Constrained(inner, _)) => {
-            walk_paths(value, inner, depth, max_depth, path, out);
         }
         _ => {}
     }
@@ -413,7 +406,7 @@ fn pick_operator(
     rng: &mut impl Rng,
 ) -> Option<OpKind> {
     let allowed = match (value, ty) {
-        (ValueTree::Leaf(Value::String(_) | Value::Bytes(_)), _) if ty.as_primitive().is_some() => {
+        (ValueTree::Leaf(Value::String(_)), _) if ty.as_primitive().is_some() => {
             &config.operators_per_type.string
         }
         (ValueTree::Leaf(_), _) if ty.as_primitive().is_some() => {
@@ -481,16 +474,20 @@ fn applicable(op: OpKind, value: &ValueTree, ty: &TypeNode) -> bool {
         ),
         OpKind::Resample => true,
         OpKind::Resize => {
-            matches!(value, ValueTree::Leaf(Value::String(_) | Value::Bytes(_)))
+            matches!(value, ValueTree::Leaf(Value::String(_)))
                 || matches!(
                     (value, ty.as_array()),
                     (ValueTree::Array(_), Some((_, None)))
                 )
         }
-        OpKind::ByteEdit => {
-            matches!(value, ValueTree::Leaf(Value::String(_) | Value::Bytes(_)))
-        }
+        OpKind::ByteEdit => matches!(value, ValueTree::Leaf(Value::String(_)))
+            || matches!(value, ValueTree::Array(_)) && is_byte_array(ty),
     }
+}
+
+fn is_byte_array(ty: &TypeNode) -> bool {
+    ty.as_array()
+        .is_some_and(|(element, _)| element.as_primitive() == Some(Primitive::U8))
 }
 
 fn apply_at(
@@ -615,10 +612,9 @@ fn resize(
     config: &GeneratorConfig,
     rng: &mut impl Rng,
 ) -> ValueTree {
-    match (value, ty) {
-        (ValueTree::Leaf(Value::String(mut text)), _)
-            if ty.as_primitive() == Some(Primitive::String) =>
-        {
+    match value {
+        ValueTree::Leaf(Value::String(mut text))
+            if ty.as_primitive() == Some(Primitive::String) => {
             let len = len_range(Primitive::String, ty.string_bound(), config, rng);
             if text.len() > len {
                 text.truncate(len);
@@ -630,18 +626,8 @@ fn resize(
             }
             ValueTree::Leaf(Value::String(text))
         }
-        (ValueTree::Leaf(Value::Bytes(mut bytes)), _)
-            if ty.as_primitive() == Some(Primitive::Bytes) =>
-        {
-            let len = len_range(Primitive::Bytes, None, config, rng);
-            if bytes.len() > len {
-                bytes.truncate(len);
-            } else {
-                bytes.extend(std::iter::repeat_with(|| rng.r#gen::<u8>()).take(len - bytes.len()));
-            }
-            ValueTree::Leaf(Value::Bytes(bytes))
-        }
-        (ValueTree::Array(mut items), TypeNode::Array(element, None)) => {
+        ValueTree::Array(mut items) if ty.as_array().is_some_and(|(_, len)| len.is_none()) => {
+            let element = ty.as_array().expect("array type checked above").0;
             let len = sample_array_len(None, ty.array_bound(), config, rng);
             if items.len() > len {
                 items.truncate(len);
@@ -653,8 +639,7 @@ fn resize(
             }
             ValueTree::Array(items)
         }
-        (value, TypeNode::Constrained(inner, _)) => resize(value, inner, config, rng),
-        (other, _) => other,
+        other => other,
     }
 }
 
@@ -670,13 +655,15 @@ fn byte_edit(value: ValueTree, rng: &mut impl Rng) -> ValueTree {
             let text = String::from_utf8(bytes).expect("printable ASCII stays valid UTF-8");
             ValueTree::Leaf(Value::String(text))
         }
-        ValueTree::Leaf(Value::Bytes(mut bytes)) => {
-            if bytes.is_empty() {
-                return ValueTree::Leaf(Value::Bytes(bytes));
+        ValueTree::Array(mut items) => {
+            if items.is_empty() {
+                return ValueTree::Array(items);
             }
-            let index = rng.gen_range(0..bytes.len());
-            bytes[index] = rng.r#gen::<u8>();
-            ValueTree::Leaf(Value::Bytes(bytes))
+            let index = rng.gen_range(0..items.len());
+            if let ValueTree::Leaf(Value::U8(byte)) = &mut items[index] {
+                *byte ^= 1 << rng.gen_range(0..8);
+            }
+            ValueTree::Array(items)
         }
         other => other,
     }

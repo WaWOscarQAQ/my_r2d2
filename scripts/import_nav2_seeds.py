@@ -2,7 +2,7 @@
 """Import input samples from the nav2-_fuzz project into my_r2d2's seed corpus.
 
 Converts the previous fuzzer's seed assets into my_r2d2's simple on-disk
-formats under tests/fixtures/nav2_seeds/:
+formats under config/nav2_seeds/:
 
   scans/*.txt       two-line payload text (7 scalars + whitespace-separated
                     ranges), the exact format r2d2_scan_bridge consumes
@@ -281,7 +281,7 @@ def main():
     parser.add_argument("--source", default=DEFAULT_SOURCE)
     parser.add_argument(
         "--output",
-        default=os.path.join(repo_root, "tests", "fixtures", "nav2_seeds"),
+        default=os.path.join(repo_root, "config", "nav2_seeds"),
     )
     args = parser.parse_args()
     if not os.path.isdir(args.source):

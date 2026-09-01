@@ -18,22 +18,26 @@
 
 ### 1.1 论文边界
 
-- 论文 §4.2.2 在 dry run / interface extraction 处明确写的是 `topics and services`。
-- 因此，不能把 action/parameter 写成论文原设。
+- 论文核心是 dry run/interface extraction、真实 ROS 发送、callback trace 反馈、
+  benchmark reference 与 new-state pool。
+- 当前仓库采用合并路线：以这套论文方法为核心，在同一个 full-stack harness 里
+  扩展 topic/service/action/safe-parameter-profile 输入面；不再维护双调度路线。
 
 ### 1.2 仓库扩展边界
 
 - [docs/research/ros2_interface_matrix.md](/home/ocsar/ROS/my_r2d2/docs/research/ros2_interface_matrix.md:1) 记录了 ROS 2 官方接口矩阵：`topic / service / action`。
 - [docs/research/nav2_costmap_parameter_interfaces.md](/home/ocsar/ROS/my_r2d2/docs/research/nav2_costmap_parameter_interfaces.md:1) 记录了 `/costmap` 参数面与恢复机制。
-- 当前 live `nav2_costmap_2d` 真实发送面已经覆盖 `topic + service + parameter`；`action` 仍未实现。
-- 所以下文第 2 步只能如实写成：`当前真实落地是 topic/service/parameter；action 仍未实现，不能宣称完成。`
+- 当前 live full-stack 真实发送面覆盖 `topic + service + action + safe parameter profile`。
+- benchmark phase 与 fuzz phase 使用同一个合并输入面；parameter round 会在采样后恢复默认值，并丢弃恢复期 trace。
+- coverage attribution 只在报告阶段按 `input_kind` / `input_source` 拆分，不进入调度器。
 
 ### 1.3 合同文档同步
 
 - [docs/plan/r2d2_reproduction_contract.md](/home/ocsar/ROS/my_r2d2/docs/plan/r2d2_reproduction_contract.md:14) 已同步到：
   - 输入面不再写成仅 `/scan`
   - state oracle 不再写成“冻结 benchmark 后只比较当前 trace”
-  - action/parameter 不再伪装成论文原设
+  - 调度路线不再拆成双 mode
+  - action/parameter 的来源只用于报告归因
 
 ## 2. 按顺序落实
 
@@ -118,9 +122,6 @@ pub fn next_payload(&mut self) -> Result<Payload, Error> {
 
 ```rust
 let mut generator = PayloadGenerator::new(interfaces, GeneratorConfig::default(), config.seed);
-for seed in seed_preload {
-    generator.pool_mut().push(seed);
-}
 
 for round in 1..=config.rounds {
     let payload = match generator.next_payload() {
@@ -155,6 +156,13 @@ ROS_DOMAIN_ID=191 cargo run --example nav2_costmap_e2e -- --benchmark-seconds 5 
   - parameter 写入 `/costmap` 动态参数
 - 本轮结束摘要：`crashes=0 new_states=0 invalid_traces=0 empty_rounds=0`
 - 本次 run 未再出现先前的 `Node not found`
+
+补充：
+
+- `seed_dir` 现在只保留 `schedules/` 作为 `/scan` 发布时序输入，不再把单一
+  `LaserScan` seeds 预填到 payload pool。
+- 这样可以避免 pool 从第一轮起就被单接口样例锁死，恢复论文描述的
+  `pool empty -> spec-based generation` 起点。
 
 ### 2.2 通过真实 ROS 接口发送
 
@@ -281,9 +289,9 @@ impl Sender for Ros2ServiceSender {
 
 核查：
 
-- 已落实：`LaserScan`、通用 `topic`、通用 `service`、`/costmap` 参数写入与恢复。
-- 未落实：`action`。
-- 因此这里的真实结论只能写成：`当前 live costmap 路径严格使用真实 ROS topic/service/parameter 发送；action 仍未完成。`
+- 已落实：`LaserScan`、通用 `topic`、通用 `service`、ROS 2 `action`、safe parameter profile 写入与恢复。
+- 当前 harness 已收敛为 full-stack Nav2 合并路线；旧 costmap-only 入口不再作为正式运行路线。
+- 因此这里的真实结论应写成：`当前 live full-stack 路径严格使用真实 ROS topic/service/action/safe-parameter-profile 发送；coverage attribution 仅进入报告，不进入调度器。`
 
 ### 2.3 真实系统执行
 
@@ -589,17 +597,15 @@ impl BenchmarkStateOracle {
 let trace = execution.trace;
 let crashed = execution.crashed;
 let verdict = oracle.evaluate(&trace, crashed);
+let input_kind = binding.input_kind_label();
+let input_source = binding.input_source_label();
+increment_counter(&mut input_kind_rounds, input_kind, 1);
+increment_counter(&mut input_source_rounds, input_source, 1);
 let empty = verdict.trace == TraceDisposition::Empty;
 if empty && !crashed {
     empty_rounds += 1;
 } else if verdict.trace == TraceDisposition::Invalid {
     invalid += 1;
-}
-if verdict.paper_supported_new_state {
-    paper_supported_new_states += 1;
-}
-if verdict.jazzy_reproduction_new_state {
-    jazzy_reproduction_new_states += 1;
 }
 let new_state = verdict.new_state;
 if crashed {
@@ -607,6 +613,8 @@ if crashed {
 }
 if new_state {
     active_new_states += 1;
+    increment_counter(&mut input_kind_new_states, input_kind, 1);
+    increment_counter(&mut input_source_new_states, input_source, 1);
 }
 ```
 
@@ -614,11 +622,9 @@ if new_state {
 
 - 已落实。
 - `crash` 与 `new_state` 已分离判定，之后再组合成日志决策。
-- `state_oracle` 现在同时给出三层结果：
-  - `paper_supported_new_state`
-  - `jazzy_reproduction_new_state`
-  - `new_state`（当前 `oracle_mode` 的 active verdict）
-- 因此 `latency_factor` / `throughput_floor` 不会再以默认日志口径冒充 paper verdict。
+- `state_oracle` 现在只给出一个 active verdict：`new_state`。
+- `input_kind` / `input_source` 只用于日志与 summary 的 coverage attribution，不参与
+  `oracle.evaluate`，也不参与 `PayloadGenerator` 选择。
 
 ### 2.8 保留触发 payload
 
@@ -700,13 +706,15 @@ for round in 1..=config.rounds {
 - `cargo test --lib` 通过
 - `cargo build --example nav2_costmap_e2e` 通过
 
-### 4.2 仍未完成
+### 4.2 当前仍需诚实标注的 gap
 
-- `action` sender 仍未实现
-- dry run 仍是 hand-maintained `costmap` binding，不是完整 ROS graph 自动发现
-- “significant deviation” 仍是 reproduction threshold，不是论文公开公式
+- dry run 不是完整 ROS graph 自动发现器；当前输入面来自 manifest、runtime
+  extension 与 safe parameter profile 的合并 binding。
+- “significant deviation” 仍是 reproduction threshold，不是论文公开公式。
+- 当前是 Nav2 full-stack 单目标受限复现，不是论文四目标完整实验环境。
 
 ### 4.3 因此当前最准确的真实表述
 
-- 已经完成的是：`严格 live fuzz loop 顺序` 在当前 `nav2_costmap_2d` 的 topic/service 真实链路上落地。
-- 还不能声称的是：`完整 ROS topic/service/action/parameter 全接口闭环` 已全部落地。
+- 已经完成的是：`严格 live fuzz loop 顺序` 在当前 Nav2 full-stack 的
+  topic/service/action/safe-parameter-profile 真实链路上落地。
+- 还不能声称的是：`完整 ROS graph 自动发现` 或 `论文四目标完整实验复现` 已全部落地。

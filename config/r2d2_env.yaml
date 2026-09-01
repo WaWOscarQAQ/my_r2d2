@@ -1,8 +1,61 @@
 env:
   R2D2_NAV2_WS: ../nav2_ws
-  R2D2_ROS_SETUP: /opt/ros/jazzy/setup.bash
+  R2D2_NAV2_SOURCE_ROOT: ../nav2_ws/src_lyrical/navigation2
+  R2D2_NAV2_BUILD_BASE: ../nav2_ws/build
+  R2D2_NAV2_INSTALL_BASE: ../nav2_ws/install
+  R2D2_NAV2_LOG_BASE: ../nav2_ws/log
+  R2D2_NAV2_INSTALL_SETUP: ../nav2_ws/install/setup.bash
+  R2D2_OVERLAY_BUILD_BASE: ../overlay_ws/build
+  R2D2_OVERLAY_INSTALL_BASE: ../overlay_ws/install
+  R2D2_OVERLAY_LOG_BASE: ../overlay_ws/log
+  R2D2_OVERLAY_INSTALL_SETUP: ../overlay_ws/install/setup.bash
+  R2D2_ROS_SETUP: /opt/ros/lyrical/setup.bash
   R2D2_PYTHON_EXECUTABLE: /usr/bin/python3
-  R2D2_COSTMAP_PARAMS: ../nav2_ws/costmap_params.yaml
   R2D2_SHM_PATH: /dev/shm/r2d2_nav2
   R2D2_FUZZ_SOURCE: ../../nav2-_fuzz
   ROS_DOMAIN_ID: "190"
+profiles:
+  lyrical:
+    env:
+      R2D2_PROFILE: lyrical
+      R2D2_NAV2_BUILD_BASE: ../nav2_ws/build_lyrical_fresh
+      R2D2_NAV2_INSTALL_BASE: ../nav2_ws/install_lyrical_fresh
+      R2D2_NAV2_LOG_BASE: ../nav2_ws/log_lyrical_fresh
+      R2D2_NAV2_INSTALL_SETUP: ../nav2_ws/install_lyrical_fresh/setup.bash
+      R2D2_OVERLAY_BUILD_BASE: ../overlay_ws/build_lyrical
+      R2D2_OVERLAY_INSTALL_BASE: ../overlay_ws/install_lyrical
+      R2D2_OVERLAY_LOG_BASE: ../overlay_ws/log_lyrical
+      R2D2_OVERLAY_INSTALL_SETUP: ../overlay_ws/install_lyrical/setup.bash
+  coverage:
+    env:
+      R2D2_PROFILE: coverage
+      R2D2_NAV2_BUILD_BASE: ../nav2_ws/build
+      R2D2_NAV2_INSTALL_BASE: ../nav2_ws/install
+      R2D2_NAV2_LOG_BASE: ../nav2_ws/log
+      R2D2_NAV2_INSTALL_SETUP: ../nav2_ws/install/setup.bash
+      R2D2_OVERLAY_BUILD_BASE: ../overlay_ws/build
+      R2D2_OVERLAY_INSTALL_BASE: ../overlay_ws/install
+      R2D2_OVERLAY_LOG_BASE: ../overlay_ws/log
+      R2D2_OVERLAY_INSTALL_SETUP: ../overlay_ws/install/setup.bash
+  tsan:
+    env:
+      R2D2_PROFILE: tsan
+      R2D2_NAV2_BUILD_BASE: ../nav2_ws/build_tsan
+      R2D2_NAV2_INSTALL_BASE: ../nav2_ws/install_tsan
+      R2D2_NAV2_LOG_BASE: ../nav2_ws/log_tsan
+      R2D2_NAV2_INSTALL_SETUP: ../nav2_ws/install_tsan/setup.bash
+      R2D2_OVERLAY_BUILD_BASE: ../overlay_ws/build_tsan
+      R2D2_OVERLAY_INSTALL_BASE: ../overlay_ws/install_tsan
+      R2D2_OVERLAY_LOG_BASE: ../overlay_ws/log_tsan
+      R2D2_OVERLAY_INSTALL_SETUP: ../overlay_ws/install_tsan/setup.bash
+  sancov:
+    env:
+      R2D2_PROFILE: sancov
+      R2D2_NAV2_BUILD_BASE: ../nav2_ws/build_sancov
+      R2D2_NAV2_INSTALL_BASE: ../nav2_ws/install_sancov
+      R2D2_NAV2_LOG_BASE: ../nav2_ws/log_sancov
+      R2D2_NAV2_INSTALL_SETUP: ../nav2_ws/install_sancov/setup.bash
+      R2D2_OVERLAY_BUILD_BASE: ../overlay_ws/build_sancov
+      R2D2_OVERLAY_INSTALL_BASE: ../overlay_ws/install_sancov
+      R2D2_OVERLAY_LOG_BASE: ../overlay_ws/log_sancov
+      R2D2_OVERLAY_INSTALL_SETUP: ../overlay_ws/install_sancov/setup.bash

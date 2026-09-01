@@ -23,17 +23,18 @@ fn forced_config(
     array: &[OpKind],
     nested: &[OpKind],
 ) -> GeneratorConfig {
-    let mut config = GeneratorConfig::default();
-    config.mutation_energy = 1;
-    // 深度 0：只收集根路径，保证单算子命中根节点，断言确定
-    config.max_recursion_depth = 0;
-    config.operators_per_type = OperatorsPerType {
-        primitive: primitive.to_vec(),
-        string: string.to_vec(),
-        array: array.to_vec(),
-        nested: nested.to_vec(),
-    };
-    config
+    GeneratorConfig {
+        mutation_energy: 1,
+        // 深度 0：只收集根路径，保证单算子命中根节点，断言确定
+        max_recursion_depth: 0,
+        operators_per_type: OperatorsPerType {
+            primitive: primitive.to_vec(),
+            string: string.to_vec(),
+            array: array.to_vec(),
+            nested: nested.to_vec(),
+        },
+        ..Default::default()
+    }
 }
 
 fn seeded_rng(seed: u64) -> StdRng {
@@ -52,7 +53,8 @@ fn leaf(value: Value) -> ValueTree {
 fn generate_value_produces_matching_leaf_for_every_primitive() {
     let config = GeneratorConfig::default();
     let mut rng = seeded_rng(42);
-    let cases: Vec<(Primitive, fn(&Value) -> bool)> = vec![
+    type PrimitiveCheck = fn(&Value) -> bool;
+    let cases: Vec<(Primitive, PrimitiveCheck)> = vec![
         (Primitive::Bool, |v| matches!(v, Value::Bool(_))),
         (
             Primitive::I8,
@@ -77,10 +79,6 @@ fn generate_value_produces_matching_leaf_for_every_primitive() {
             Primitive::String,
             |v| matches!(v, Value::String(s) if s.len() <= 64 && s.chars().all(|c| (0x20..=0x7e).contains(&(c as u32)))),
         ),
-        (
-            Primitive::Bytes,
-            |v| matches!(v, Value::Bytes(b) if b.len() <= 64),
-        ),
     ];
     for (primitive, check) in cases {
         let value = generate_value(&primitive.into(), &mut rng, &config);
@@ -96,14 +94,16 @@ fn generate_value_produces_matching_leaf_for_every_primitive() {
 
 #[test]
 fn generate_value_respects_custom_ranges_and_array_bounds() {
-    let mut config = GeneratorConfig::default();
-    config.per_type_value_ranges = {
-        let mut ranges = ValueRanges::default();
-        ranges.insert(Primitive::I32, ValueRange::new(-3.0, 3.0));
-        ranges.insert(Primitive::String, ValueRange::new(2.0, 2.0));
-        ranges
+    let config = GeneratorConfig {
+        per_type_value_ranges: {
+            let mut ranges = ValueRanges::default();
+            ranges.insert(Primitive::I32, ValueRange::new(-3.0, 3.0));
+            ranges.insert(Primitive::String, ValueRange::new(2.0, 2.0));
+            ranges
+        },
+        array_len_range: 5..=5,
+        ..Default::default()
     };
-    config.array_len_range = 5..=5;
     let mut rng = seeded_rng(7);
 
     let value = generate_value(&Primitive::I32.into(), &mut rng, &config);
@@ -314,10 +314,9 @@ fn boundary_replaces_i32_with_a_range_endpoint() {
 }
 
 #[test]
-fn boundary_on_u8_clamps_negative_candidate_to_zero() {
+fn boundary_on_u8_uses_valid_type_endpoints() {
     let config = forced_config(&[OpKind::Boundary], &[], &[], &[]);
     let mutator = Mutator::new(config);
-    // 默认 U8 范围 0..1000，候选 {-1000 的 clamp, 0, 1000 截断为 232}
     for seed in 0..32 {
         let out = mutator.mutate(
             &leaf(Value::U8(50)),
@@ -325,7 +324,7 @@ fn boundary_on_u8_clamps_negative_candidate_to_zero() {
             &mut seeded_rng(seed),
         );
         assert!(
-            matches!(out, ValueTree::Leaf(Value::U8(v)) if [0, 232].contains(&v)),
+            matches!(out, ValueTree::Leaf(Value::U8(v)) if [0, 255].contains(&v)),
             "seed {seed} got {out:?}"
         );
     }
@@ -367,18 +366,16 @@ fn resize_truncates_string_to_configured_length() {
 }
 
 #[test]
-fn resize_grows_bytes_to_configured_length() {
-    let mut config = forced_config(&[], &[OpKind::Resize], &[], &[]);
-    config
-        .per_type_value_ranges
-        .insert(Primitive::Bytes, ValueRange::new(5.0, 5.0));
+fn resize_respects_bounded_byte_array_limit() {
+    let mut config = forced_config(&[], &[], &[OpKind::Resize], &[]);
+    config.array_len_range = 5..=5;
     let mutator = Mutator::new(config);
     let out = mutator.mutate(
-        &leaf(Value::Bytes(vec![1, 2])),
-        &Primitive::Bytes.into(),
+        &ValueTree::Array(vec![leaf(Value::U8(1)), leaf(Value::U8(2))]),
+        &TypeNode::bounded_array(Primitive::U8.into(), 3),
         &mut seeded_rng(1),
     );
-    assert!(matches!(out, ValueTree::Leaf(Value::Bytes(b)) if b.len() == 5 && b[..2] == [1, 2]));
+    assert!(matches!(out, ValueTree::Array(items) if items.len() == 3));
 }
 
 #[test]
@@ -432,15 +429,18 @@ fn byte_edit_keeps_empty_string_empty() {
 }
 
 #[test]
-fn byte_edit_preserves_bytes_length() {
-    let config = forced_config(&[], &[OpKind::ByteEdit], &[], &[]);
+fn byte_edit_changes_one_byte_and_preserves_length() {
+    let config = forced_config(&[], &[], &[OpKind::ByteEdit], &[]);
     let mutator = Mutator::new(config);
+    let value = ValueTree::Array(vec![leaf(Value::U8(10)), leaf(Value::U8(20)), leaf(Value::U8(30))]);
     let out = mutator.mutate(
-        &leaf(Value::Bytes(vec![10, 20, 30])),
-        &Primitive::Bytes.into(),
+        &value,
+        &TypeNode::array(Primitive::U8.into()),
         &mut seeded_rng(2),
     );
-    assert!(matches!(out, ValueTree::Leaf(Value::Bytes(b)) if b.len() == 3));
+    let (ValueTree::Array(before), ValueTree::Array(after)) = (value, out) else { panic!("expected arrays") };
+    assert_eq!(before.len(), after.len());
+    assert_eq!(before.iter().zip(after).filter(|(a, b)| a != &b).count(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -476,8 +476,10 @@ fn mutate_returns_value_unchanged_when_shape_mismatches_type() {
 
 #[test]
 fn mutate_is_deterministic_for_a_fixed_seed() {
-    let mut config = GeneratorConfig::default();
-    config.mutation_energy = 8;
+    let config = GeneratorConfig {
+        mutation_energy: 8,
+        ..Default::default()
+    };
     let ty = TypeNode::nested(vec![
         Field::new("text", Primitive::String),
         Field::new("items", TypeNode::array(Primitive::U32.into())),
@@ -539,9 +541,11 @@ fn mutating_load_map_response_traverses_deep_paths() {
         .clone();
     let ty = TypeNode::nested(response);
 
-    let mut config = GeneratorConfig::default();
-    config.mutation_energy = 16; // 深树需要更多能量才可能触达叶子
-    config.max_recursion_depth = 16;
+    let config = GeneratorConfig {
+        mutation_energy: 16, // 深树需要更多能量才可能触达叶子
+        max_recursion_depth: 16,
+        ..Default::default()
+    };
     let mut rng = seeded_rng(8);
     let mut value = generate_value(&ty, &mut rng, &config);
     let mutator = Mutator::new(config.clone());
